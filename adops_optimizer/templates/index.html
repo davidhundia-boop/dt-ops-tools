@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Campaign Optimization Tool</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 10pt;
+      background: #F5F7FA;
+      color: #333;
+      margin: 0;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+
+    h1 {
+      font-size: 16pt;
+      font-weight: bold;
+      color: #1F3864;
+      margin: 0 0 4px 0;
+    }
+    .subtitle {
+      font-size: 10pt;
+      color: #666666;
+      margin: 0 0 16px 0;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #ddd;
+      margin: 0 0 20px 0;
+    }
+
+    .group {
+      background: #fff;
+      border: 1px solid #E0E0E0;
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .group-title {
+      font-weight: bold;
+      margin-bottom: 12px;
+      color: #1F3864;
+    }
+
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .file-row:last-child { margin-bottom: 0; }
+    .file-row label { width: 220px; flex-shrink: 0; }
+    .file-row input[type="file"] {
+      flex: 1;
+      min-width: 0;
+      padding: 6px 8px;
+    }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: 1fr 80px 1fr 80px;
+      gap: 12px 16px;
+      align-items: center;
+    }
+    .kpi-grid label { justify-self: end; }
+    .kpi-grid input[type="text"] {
+      width: 60px;
+      max-width: 60px;
+      padding: 6px 8px;
+    }
+    .kpi-grid input[type="number"] {
+      width: 80px;
+      padding: 6px 8px;
+    }
+
+    .progress {
+      height: 6px;
+      background: #E0E0E0;
+      border-radius: 3px;
+      margin-bottom: 12px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress.visible { display: block; }
+    .progress-bar {
+      height: 100%;
+      width: 30%;
+      background: #1F3864;
+      animation: progress 0.8s ease-in-out infinite;
+    }
+    @keyframes progress {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(400%); }
+    }
+
+    .run-btn {
+      display: block;
+      width: 100%;
+      height: 44px;
+      background: #1F3864;
+      color: white;
+      font-weight: bold;
+      font-size: 12pt;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .run-btn:hover:not(:disabled) { background: #2E4D8A; }
+    .run-btn:disabled {
+      background: #9CA3AF;
+      color: #E5E7EB;
+      cursor: not-allowed;
+    }
+
+    #results { display: none; }
+    #results.visible { display: block; }
+
+    .cards {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .card {
+      flex: 1;
+      min-width: 120px;
+      background: #fff;
+      border: 1px solid #E0E0E0;
+      border-radius: 4px;
+      padding: 12px 16px;
+    }
+    .card-value {
+      font-size: 18pt;
+      font-weight: bold;
+      color: #1F3864;
+    }
+    .card-desc {
+      font-size: 9pt;
+      color: #666666;
+      margin-top: 4px;
+    }
+
+    .tables-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    @media (max-width: 700px) {
+      .tables-row { grid-template-columns: 1fr; }
+    }
+    .table-wrap {
+      background: #fff;
+      border: 1px solid #E0E0E0;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .table-wrap h4 {
+      margin: 0;
+      padding: 10px 12px;
+      background: #f8f9fa;
+      font-size: 10pt;
+      color: #1F3864;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 10pt;
+    }
+    th, td { padding: 8px 12px; text-align: left; }
+    th {
+      background: #1F3864;
+      color: white;
+      font-weight: bold;
+    }
+    tbody tr:nth-child(even) { background: #F0F4FA; }
+    tbody tr:nth-child(odd) { background: #FFFFFF; }
+    .table-scroll { max-height: 180px; overflow: auto; }
+
+    .save-btn {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #217346;
+      color: white;
+      font-weight: bold;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      text-decoration: none;
+      font-size: 10pt;
+    }
+    .save-btn:hover { background: #1e6639; color: white; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Campaign Optimization Tool</h1>
+    <p class="subtitle">Digital Turbine Preload Campaign Optimizer</p>
+    <hr>
+
+    <form id="form" class="group">
+      <div class="group-title">Input Files</div>
+      <div class="file-row">
+        <label for="internal_file">Internal Campaign Data (.xlsx)</label>
+        <input type="file" id="internal_file" name="internal_file" accept=".xlsx" required>
+      </div>
+      <div class="file-row">
+        <label for="advertiser_file">Advertiser Performance Report (.csv)</label>
+        <input type="file" id="advertiser_file" name="advertiser_file" accept=".csv" required>
+      </div>
+    </form>
+
+    <div class="group">
+      <div class="group-title">KPI Settings</div>
+      <div class="kpi-grid">
+        <label for="d7_col">ROI D7 Column Letter</label>
+        <input type="text" id="d7_col" name="d7_col" maxlength="1" value="I" placeholder="I">
+        <label for="d2nd_col">ROI D2nd Column Letter (D14 or D30)</label>
+        <input type="text" id="d2nd_col" name="d2nd_col" maxlength="1" value="K" placeholder="K">
+        <label for="kpi_d7">D7 KPI Target (%)</label>
+        <input type="number" id="kpi_d7" name="kpi_d7" min="0" max="100" step="0.01" value="3.36">
+        <label for="kpi_d2nd">D2nd KPI Target (%)</label>
+        <input type="number" id="kpi_d2nd" name="kpi_d2nd" min="0" max="100" step="0.01" value="13.36">
+      </div>
+    </div>
+
+    <div class="progress" id="progress">
+      <div class="progress-bar"></div>
+    </div>
+    <button type="button" class="run-btn" id="runBtn">Run Optimization</button>
+
+    <div id="results" class="group">
+      <div class="group-title">Results</div>
+      <div class="cards">
+        <div class="card">
+          <div class="card-value" id="cardTotal">0</div>
+          <div class="card-desc">Total Sites</div>
+        </div>
+        <div class="card">
+          <div class="card-value" id="cardActioned">0</div>
+          <div class="card-desc">Sites Actioned</div>
+        </div>
+        <div class="card">
+          <div class="card-value" id="cardDisregarded">0</div>
+          <div class="card-desc">Sites Disregarded</div>
+        </div>
+        <div class="card">
+          <div class="card-value" id="cardCap">0</div>
+          <div class="card-desc">Daily Cap Suggestions</div>
+        </div>
+        <div class="card">
+          <div class="card-value" id="cardKpiCol">–</div>
+          <div class="card-desc">KPI Column Used</div>
+        </div>
+      </div>
+      <div class="tables-row">
+        <div class="table-wrap">
+          <h4>Action Breakdown</h4>
+          <div class="table-scroll">
+            <table id="actionTable">
+              <thead><tr><th>Action</th><th>Count</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <h4>Segment Breakdown</h4>
+          <div class="table-scroll">
+            <table id="segmentTable">
+              <thead><tr><th>Segment</th><th>Count</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <a href="#" class="save-btn" id="saveBtn" style="display:none;" download="optimization_output.xlsx">Save Optimization Report</a>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('form');
+    const runBtn = document.getElementById('runBtn');
+    const progress = document.getElementById('progress');
+    const results = document.getElementById('results');
+    const saveBtn = document.getElementById('saveBtn');
+
+    runBtn.addEventListener('click', async () => {
+      const internal = document.getElementById('internal_file').files[0];
+      const advertiser = document.getElementById('advertiser_file').files[0];
+      const d7 = document.getElementById('d7_col').value.trim().toUpperCase();
+      const d2nd = document.getElementById('d2nd_col').value.trim().toUpperCase();
+      const kpiD7 = document.getElementById('kpi_d7').value;
+      const kpiD2nd = document.getElementById('kpi_d2nd').value;
+
+      if (!internal) {
+        alert('Please select the Internal Campaign Data (.xlsx) file.');
+        return;
+      }
+      if (!advertiser) {
+        alert('Please select the Advertiser Performance Report (.csv) file.');
+        return;
+      }
+      if (d7.length !== 1 || !/^[A-Z]$/.test(d7)) {
+        alert('ROI D7 Column Letter must be a single letter A–Z.');
+        return;
+      }
+      if (d2nd.length !== 1 || !/^[A-Z]$/.test(d2nd)) {
+        alert('ROI D2nd Column Letter must be a single letter A–Z.');
+        return;
+      }
+      if (parseFloat(kpiD7) <= 0 || parseFloat(kpiD2nd) <= 0) {
+        alert('KPI targets must be greater than 0.');
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append('internal_file', internal);
+      fd.append('advertiser_file', advertiser);
+      fd.append('d7_col', d7);
+      fd.append('d2nd_col', d2nd);
+      fd.append('kpi_d7', kpiD7);
+      fd.append('kpi_d2nd', kpiD2nd);
+
+      runBtn.disabled = true;
+      progress.classList.add('visible');
+
+      try {
+        const r = await fetch('/run', { method: 'POST', body: fd });
+        const data = await r.json();
+        if (!r.ok) {
+          alert(data.error || 'Run failed.');
+          return;
+        }
+        const summary = data.summary;
+        document.getElementById('cardTotal').textContent = summary.total_rows ?? 0;
+        document.getElementById('cardActioned').textContent = summary.rows_actioned ?? 0;
+        document.getElementById('cardDisregarded').textContent = summary.rows_disregarded ?? 0;
+        document.getElementById('cardCap').textContent = summary.rows_with_cap ?? 0;
+        document.getElementById('cardKpiCol').textContent = summary.roi_d2nd_col ?? '–';
+
+        const actionBreakdown = summary.action_breakdown || {};
+        const actionRows = Object.entries(actionBreakdown).sort((a, b) => b[1] - a[1]);
+        const actionTbody = document.querySelector('#actionTable tbody');
+        actionTbody.innerHTML = actionRows.map(([action, count]) =>
+          `<tr><td>${escapeHtml(action)}</td><td>${count}</td></tr>`
+        ).join('') || '<tr><td colspan="2">No data</td></tr>';
+
+        const segmentBreakdown = summary.segment_breakdown || {};
+        const segmentRows = Object.entries(segmentBreakdown).sort((a, b) => b[1] - a[1]);
+        const segmentTbody = document.querySelector('#segmentTable tbody');
+        segmentTbody.innerHTML = segmentRows.map(([seg, count]) =>
+          `<tr><td>${escapeHtml(seg)}</td><td>${count}</td></tr>`
+        ).join('') || '<tr><td colspan="2">No data</td></tr>';
+
+        saveBtn.href = '/download/' + data.download_id;
+        saveBtn.style.display = 'inline-block';
+        results.classList.add('visible');
+        alert('Optimization complete! ' + (summary.rows_actioned ?? 0) + ' sites actioned.');
+      } catch (e) {
+        alert('Error: ' + (e.message || String(e)));
+      } finally {
+        runBtn.disabled = false;
+        progress.classList.remove('visible');
+      }
+    });
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>
