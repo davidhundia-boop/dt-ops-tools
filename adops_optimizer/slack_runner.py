@@ -45,14 +45,15 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 # ---------------------------------------------------------------------------
 PRESETS = {
     "domino_dreams": {
-        "label": "Domino Dreams – ROAS D7",
+        "label": "Domino Dreams – ROAS D7: 2.18%",
         "kpi_mode": "roas",
         "kpi_col_d7_spec": "Domino Dreams Marketing Campaigns Daily Metrics Full ROAS D7",
         "kpi_col_d2nd_spec": None,          # None = reuse D7 column
-        "kpi_d7_pct": 2.18,
+        "kpi_d7_pct": 2.18,                 # Target: 2.18% ROAS D7
         "kpi_d2nd_pct": None,               # None = same as D7
         "weight_main": 1.0,
         "weight_secondary": 0.0,
+        "roas_data_as_percentage": True,    # File data is in percentage format (2.18 = 2.18%)
     },
     # Example: add another client
     # "another_client": {
@@ -64,6 +65,7 @@ PRESETS = {
     #     "kpi_d2nd_pct": 8.0,
     #     "weight_main": 0.80,
     #     "weight_secondary": 0.20,
+    #     "roas_data_as_percentage": False,
     # },
 }
 
@@ -186,6 +188,7 @@ def handle_optimize(ack, command, client, respond):
             weight_main=preset["weight_main"],
             weight_secondary=preset["weight_secondary"],
             kpi_mode=preset["kpi_mode"],
+            roas_data_as_percentage=preset.get("roas_data_as_percentage", True),
         )
 
         # 5. Upload output Excel to Slack

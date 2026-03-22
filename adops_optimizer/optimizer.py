@@ -104,16 +104,23 @@ def _parse_pct(val):
         return np.nan
 
 
-def _parse_roas(val):
+def _parse_roas(val, as_percentage=False):
     """
-    Parse ROAS value (e.g. '2.18%', '2.18', '218%') to a ratio.
-    ROAS is typically expressed as a ratio (e.g., 2.18 means $2.18 return per $1 spent).
+    Parse ROAS value (e.g. '2.18%', '2.18', '218%') to a decimal.
     
-    Rules:
-    - If value has '%' and is > 1 after removing %, treat as percentage (218% -> 2.18)
-    - If value has '%' and is <= 1 after removing %, treat as actual percentage (2.18% -> 0.0218)
-    - If numeric and > 10, assume it's a percentage representation (218 -> 2.18)
+    Parameters:
+    - val: The value to parse
+    - as_percentage: If True, treat raw numbers as percentages (e.g., 2.18 -> 0.0218)
+                    If False, treat raw numbers <= 10 as ratios (e.g., 2.18 -> 2.18)
+    
+    Rules when as_percentage=False (ratio mode - traditional ROAS):
+    - If value has '%', divide by 100 (2.18% -> 0.0218, 218% -> 2.18)
+    - If numeric and > 10, assume percentage representation (218 -> 2.18)
     - If numeric and <= 10, assume it's already a ratio (2.18 -> 2.18)
+    
+    Rules when as_percentage=True (percentage mode - for data stored as percentages):
+    - If value has '%', divide by 100 (2.18% -> 0.0218)
+    - If numeric (no %), also divide by 100 (2.18 -> 0.0218)
     """
     if pd.isna(val):
         return np.nan
@@ -131,10 +138,13 @@ def _parse_roas(val):
         return np.nan
     
     if has_pct:
-        # If it had a % sign, convert from percentage to ratio
+        # If it had a % sign, always convert from percentage to decimal
+        return x / 100.0
+    elif as_percentage:
+        # Treat raw numbers as percentages (e.g., 2.18 -> 0.0218)
         return x / 100.0
     else:
-        # No % sign - if > 10, assume it's percentage representation
+        # Legacy behavior: treat values > 10 as percentages, else as ratios
         if x > 10:
             return x / 100.0
         return x
@@ -200,14 +210,15 @@ def run_optimization(
     kpi_col_d7_spec=None,
     kpi_col_d2nd_spec=None,
     kpi_mode="roi",
+    roas_data_as_percentage=True,
 ):
     """
     Run the full optimization pipeline.
     Returns (output_bytes: BytesIO, summary: dict).
     
     Parameters:
-    - internal_file: Path to internal campaign data (Excel .xlsx)
-    - advertiser_file: Path to advertiser performance report (CSV)
+    - internal_file: Path to internal campaign data (Excel .xlsx) - site_performance file
+    - advertiser_file: Path to advertiser performance report (CSV) - DT_DX client file
     - kpi_col_d7_idx: (deprecated) 0-based column index for D7 KPI
     - kpi_col_d2nd_idx: (deprecated) 0-based column index for secondary KPI
     - kpi_d7_pct: Target for D7 KPI (as percentage, e.g., 2.18 for 2.18%)
@@ -217,6 +228,8 @@ def run_optimization(
     - kpi_col_d7_spec: Column letter (e.g., 'I') or name pattern (e.g., 'ROAS D7') for D7 KPI
     - kpi_col_d2nd_spec: Column letter or name pattern for secondary KPI
     - kpi_mode: 'roi' (percentage-based) or 'roas' (ratio-based)
+    - roas_data_as_percentage: If True, treat ROAS file values as percentages (2.18 = 2.18%)
+                               If False, treat as ratios (2.18 = $2.18 return per $1)
     """
     weight_main = float(weight_main)
     weight_secondary = float(weight_secondary)
@@ -265,8 +278,12 @@ def run_optimization(
 
     # Parse KPI values based on mode
     if kpi_mode == "roas":
-        advertiser["ROI D7"] = advertiser.iloc[:, kpi_col_d7_idx].apply(_parse_roas)
-        advertiser["ROI D2nd"] = advertiser.iloc[:, kpi_col_d2nd_idx].apply(_parse_roas)
+        advertiser["ROI D7"] = advertiser.iloc[:, kpi_col_d7_idx].apply(
+            lambda v: _parse_roas(v, as_percentage=roas_data_as_percentage)
+        )
+        advertiser["ROI D2nd"] = advertiser.iloc[:, kpi_col_d2nd_idx].apply(
+            lambda v: _parse_roas(v, as_percentage=roas_data_as_percentage)
+        )
     else:
         advertiser["ROI D7"] = advertiser.iloc[:, kpi_col_d7_idx].apply(_parse_pct)
         advertiser["ROI D2nd"] = advertiser.iloc[:, kpi_col_d2nd_idx].apply(_parse_pct)
