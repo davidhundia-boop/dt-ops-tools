@@ -6,9 +6,12 @@ Takes a raw tracking URL + device ID → produces a ready-to-fire test link.
 
 Key behaviors:
   1. Detect MMP from the host
-  2. Detect Unified integration (id2 present → hardcode id2=dV9XX0xY)
+  2. Detect Unified integration (id2 present → hardcode id2 per ODS/DSP type)
+     ODS links use [...] placeholders → id2=dV9XX0xY
+     DSP links use {...} placeholders → id2=ckFCRVBW
   3. Replace click ID using MMP-specific param name
   4. Replace device ID, auto-hashing to SHA1 when the param requires it
+     Kochava: hashing signalled by device_id_is_hashed=true + device_hash_method=sha1
   5. Replace [ClickID] placeholders embedded inside other param values (e.g. Adjust callbacks)
 """
 
@@ -17,12 +20,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+from datetime import date
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-UNIFIED_ID2_VALUE = "dV9XX0xY"
-DEFAULT_CLICK_ID = "David1"
+ODS_ID2_VALUE = "dV9XX0xY"   # ODS — placeholder style: [...]
+DSP_ID2_VALUE = "ckFCRVBW"   # DSP — placeholder style: {...}
+
+DEFAULT_CLICK_ID = f"DTest{date.today().strftime('%d%m')}"  # e.g. DTest2303
 
 # ── MMP detection ─────────────────────────────────────────────────────────────
 # Checked in order; first match wins.
@@ -71,8 +77,8 @@ MMP_CONFIG = {
     },
     "kochava": {
         "click_id_params": ["click_id"],
-        "device_id_plain": ["device_id"],  # when device_id_type=adid
-        "device_id_hashed": [],  # same param, value changes
+        "device_id_plain": ["device_id"],  # raw; when device_id_is_hashed != true
+        "device_id_hashed": [],  # hashing signalled by device_id_is_hashed=true + device_hash_method=sha1
     },
     "branch": {
         "click_id_params": ["~click_id"],
@@ -203,6 +209,16 @@ def build_link(
         if "sha1" in kl:
             hashed_params_in_url.add(k)
 
+    # Kochava signals hashing via separate flag params rather than a distinct param name
+    if mmp == "kochava":
+        param_dict_lower = {k.lower(): v.lower() for k, v in params}
+        if (
+            param_dict_lower.get("device_id_is_hashed") == "true"
+            and param_dict_lower.get("device_hash_method") == "sha1"
+        ):
+            hashed_params_in_url.add("device_id")
+            messages.append("Kochava SHA-1 hashing detected (device_id_is_hashed=true, device_hash_method=sha1)")
+
     sha1_required = len(hashed_params_in_url) > 0
     resolved_id, id_msg = resolve_device_id(device_id, sha1_required)
     if id_msg:
@@ -219,15 +235,20 @@ def build_link(
         kl = key.lower()
         new_value = value
 
-        # 5a. id2 → hardcode for Unified
+        # 5a. id2 → hardcode for Unified (ODS vs DSP detected by placeholder bracket style)
         if kl == "id2" and is_unified:
-            new_value = UNIFIED_ID2_VALUE
+            if "{" in value:
+                new_value = DSP_ID2_VALUE
+                id2_type = "DSP"
+            else:
+                new_value = ODS_ID2_VALUE
+                id2_type = "ODS"
             changes.append(
                 {
                     "param": key,
                     "old": value,
                     "new": new_value,
-                    "desc": "Unified id2 hardcoded",
+                    "desc": f"Unified id2 hardcoded ({id2_type})",
                 }
             )
 
