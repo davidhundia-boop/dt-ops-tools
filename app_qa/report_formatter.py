@@ -332,7 +332,28 @@ def _legal_details(legal: dict) -> list[dict]:
 
 # ── Main Builder ───────────────────────────────────────────────────────────────
 
-def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str) -> list[dict]:
+def _classification_line(cls: dict) -> str:
+    """Format the category/sub-category line for the summary block."""
+    if cls.get("error"):
+        return f":file_folder: *Category:* _Classification unavailable — {cls['error'][:80]}_"
+
+    main  = cls.get("main_category") or "Unknown"
+    sub   = cls.get("sub_category")
+    conf  = cls.get("confidence", "genre_only")
+
+    if not sub or sub == main:
+        return f":file_folder: *Category:* {main}"
+
+    if conf == "strong":
+        return f":file_folder: *Category:* {main}   |   *Sub-category:* :rotating_light: {sub}"
+    elif conf == "weak":
+        return f":file_folder: *Category:* {main}   |   *Sub-category:* {sub} _(possibly — low confidence)_"
+    else:
+        # genre_only: sub-category is just a refined version of the genre
+        return f":file_folder: *Category:* {main}   |   *Sub-category:* {sub}"
+
+
+def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str, classification: dict | None = None) -> list[dict]:
     """
     Build the complete Slack Block Kit payload for the QA report.
 
@@ -361,9 +382,13 @@ def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str) -> list[
 
     blocks: list[dict] = []
 
+    cls = classification or {}
+
     # ── Header ──
     blocks.append(_header(f"QA Report — {app_name}"))
     blocks.append(_context(f"`{package}`  |  _{filename}_  |  {timestamp}"))
+    if cls:
+        blocks.append(_section(_classification_line(cls)))
     blocks.append(_divider())
 
     # ── Tier 1: Summary ──
@@ -377,6 +402,15 @@ def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str) -> list[
         f"{legal_circle}  *Privacy & Legal*     {legal_status}"
     )
     blocks.append(_section(summary))
+
+    # Category sub-row (only shown if a named sub-category was identified)
+    if cls and not cls.get("error"):
+        sub  = cls.get("sub_category")
+        conf = cls.get("confidence", "genre_only")
+        if sub and conf in ("strong", "weak"):
+            icon = ":rotating_light:" if conf == "strong" else ":large_yellow_circle:"
+            suffix = "" if conf == "strong" else " _(possibly)_"
+            blocks.append(_context(f"{icon}  *Flagged sub-category:* {sub}{suffix}"))
     blocks.append(_divider())
     blocks.append(_section(_overall(wl, pi, legal)))
     blocks.append(_divider())

@@ -138,6 +138,53 @@ def run_play_integrity(apk_path: str) -> dict:
         return {"error": str(exc)}
 
 
+def run_classification(apk_path: str, legal: dict) -> dict:
+    """Query Play Store for genre/description and classify app category + sub-category."""
+    try:
+        from app_classifier import classify_app
+        try:
+            from google_play_scraper import app as gp_app
+        except ImportError:
+            return {"error": "google-play-scraper not installed"}
+
+        pkg = legal.get("package_name") or ""
+        if not pkg:
+            # Fall back to extracting from APK directly
+            spec = importlib.util.spec_from_file_location(
+                "check_app_legal", SCRIPTS_DIR / "check_app_legal.py"
+            )
+            mod = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(mod)
+            except SystemExit:
+                pass
+            pkg, _ = mod.resolve_input(apk_path)
+
+        if not pkg:
+            return {"error": "Could not determine package name for classification"}
+
+        store_data: dict = {}
+        try:
+            store_data = gp_app(pkg, lang="en", country="us")
+        except Exception:
+            pass  # App not on Play Store — classify from name only
+
+        # Pull any sensitive permissions surfaced by the legal check
+        ds = legal.get("data_safety") or {}
+        permissions = ds.get("suspect_permissions", [])
+
+        return classify_app(
+            package_name=pkg,
+            app_name=legal.get("app_name") or store_data.get("title") or "",
+            description=store_data.get("description") or store_data.get("summary") or "",
+            genre=store_data.get("genre") or "",
+            genre_id=store_data.get("genreId") or "",
+            permissions=permissions,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def run_legal(apk_path: str) -> dict:
     """Import check_app_legal as a module and call check_app() for structured data."""
     spec = importlib.util.spec_from_file_location(
@@ -255,14 +302,15 @@ def handle_mention(event, client, say):
         )
         return
 
-    # ── Run all 3 analyses ──
+    # ── Run all analyses ──
     try:
         wl = run_wake_lock(apk_path)
         pi = run_play_integrity(apk_path)
         legal = run_legal(apk_path)
+        classification = run_classification(apk_path, legal)
 
         from report_formatter import build_report_blocks
-        blocks = build_report_blocks(wl, pi, legal, apk_filename or "unknown.apk")
+        blocks = build_report_blocks(wl, pi, legal, apk_filename or "unknown.apk", classification)
 
         client.chat_postMessage(
             channel=channel,

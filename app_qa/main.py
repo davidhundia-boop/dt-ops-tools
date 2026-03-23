@@ -31,15 +31,36 @@ def main(argv: list[str] | None = None) -> int:
         wl = qa.run_wake_lock(args.apk)
         pi = qa.run_play_integrity(args.apk)
         legal = qa.run_legal(args.apk)
+        classification = qa.run_classification(args.apk, legal)
     except Exception as e:
         print(f"QA run failed: {e}", file=sys.stderr)
         return 1
 
     if args.json:
-        print(json.dumps({"wake_lock": wl, "play_integrity": pi, "legal": legal}, indent=2))
+        print(json.dumps(
+            {"wake_lock": wl, "play_integrity": pi, "legal": legal, "classification": classification},
+            indent=2,
+        ))
         return 0
 
-    print("--- Wake lock ---")
+    print("--- Classification ---")
+    cls = classification
+    if cls.get("error"):
+        print(f"  ERROR: {cls['error']}")
+    else:
+        print(f"  Main category : {cls.get('main_category', 'Unknown')}")
+        sub  = cls.get("sub_category")
+        conf = cls.get("confidence", "genre_only")
+        if sub:
+            label = f"{sub}"
+            if conf == "weak":
+                label += "  (possibly — low confidence)"
+            print(f"  Sub-category  : {label}")
+        print(f"  Confidence    : {conf}")
+        if cls.get("signals"):
+            print(f"  Signals       : {', '.join(cls['signals'][:6])}")
+
+    print("\n--- Wake lock ---")
     print(json.dumps(wl, indent=2)[:2000])
     print("\n--- Play Integrity ---")
     print(json.dumps(pi, indent=2)[:2000])
