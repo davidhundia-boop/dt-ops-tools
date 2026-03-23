@@ -1,0 +1,73 @@
+# DT Ops Tools — Agent Routing
+
+You are an agent operating inside the `dt-ops-tools` monorepo.
+Each subfolder is a standalone tool. Route the user's request to the correct tool based on the trigger keywords below.
+
+## Tool Routing
+
+| Trigger keywords | Tool | Entry point |
+|---|---|---|
+| "optimization", "optimizer", "bid", "KPI", "ROI", "ROAS", "fill rate", "fillrate", "scale", "performance optimization", "scale optimization", "campaign" | **AdOps Optimizer** | `adops_optimizer/optimizer.py` |
+| "app QA", "APK", "Play Integrity", "wake lock", "compliance", "screening" | **App QA Agent** | `app_qa/` |
+| "tracking link", "attribution link", "link builder", "MMP" | **Tracking Link Builder** | `tracking_link_builder/` |
+
+## AdOps Optimizer — Quick Reference
+
+**Read `adops_optimizer/AGENT_INSTRUCTIONS.md` first.** It has full API docs, code examples, and CLI usage.
+
+The optimizer has two modes — pick based on the user's intent:
+
+### Performance Optimization
+- Use when: user mentions KPI, ROI, ROAS, bid decrease, segment colors, or performance targets
+- Requires: internal file (.xlsx) + advertiser file (.csv) + KPI settings
+- Does: segments sites by KPI performance, adjusts bids up/down, suggests daily caps
+
+### Scale Optimization
+- Use when: user mentions scale, fill rate, volume, capacity, or bid increase
+- Requires: internal file (.xlsx) only. Advertiser file is optional.
+- Does: increases bids based on FillRate bands to grow volume
+
+### How to run
+
+```python
+from adops_optimizer.optimizer import run_optimization, run_scale_optimization, xlsx_to_csv
+
+# Performance mode
+buf, summary = run_optimization(
+    internal_file="path.xlsx",
+    advertiser_file="path.csv",
+    kpi_col_d7_spec="I",
+    kpi_col_d2nd_spec="K",
+    kpi_d7_pct=3.36,
+    kpi_d2nd_pct=13.36,
+    kpi_mode="roi",
+)
+
+# Scale mode
+buf, summary = run_scale_optimization(
+    internal_file="path.xlsx",
+)
+
+# Convert to CSV (always prefer CSV output)
+csv_buf = xlsx_to_csv(buf)
+```
+
+### CLI
+
+```bash
+# Performance
+python adops_optimizer/main.py --mode performance --internal data.xlsx --advertiser perf.csv --d7-spec I --d2nd-spec K --d7-target 3.36 --d2nd-target 13.36 --format csv -o output.csv
+
+# Scale
+python adops_optimizer/main.py --mode scale --internal data.xlsx --format csv -o output.csv
+```
+
+### Output
+- Default to **CSV** output unless the user explicitly asks for Excel
+- Use `xlsx_to_csv(buf)` to convert, or pass `--format csv` on CLI
+- Return the CSV file to the user (upload to Slack, provide download link, etc.)
+
+### Important
+- Always call `optimizer.py` directly — never use the UI apps (app.py, app_web.py)
+- OM Push and Notifications sites are always excluded automatically
+- If the user doesn't specify a mode, ask them: "Performance or Scale optimization?"
