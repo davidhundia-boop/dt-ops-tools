@@ -753,3 +753,375 @@ def run_optimization(
         "segment_breakdown": segment_breakdown,
     }
     return buf, summary
+
+
+def run_scale_optimization(
+    internal_file,
+    advertiser_file=None,
+    kpi_col_d7_spec=None,
+    kpi_col_d2nd_spec=None,
+    kpi_mode="roi",
+):
+    """
+    Run Scale Optimization pipeline (FillRate-based bid increases).
+    Only the internal file is required. The advertiser file is optional —
+    if provided with KPI column specs, ROI/ROAS columns are merged in for display.
+    Returns (output_bytes: BytesIO, summary: dict).
+
+    Core logic:
+    - Sort by FillRate high to low
+    - FillRate >= 85%: no action (already at capacity)
+    - 70–85%: +10%, 50–70%: +15%, 35–50%: +20%, 20–35%: +25%, 0–20%: +30%
+    - Safety filters (skip site if ANY apply):
+        - spend < $100
+        - maxPreloads < 100
+        - dailyCap already exists for the site
+    - CVR performance bonus: if CVR > 20%, add +5% to the bid increase
+    - Guardrail: final bid must not exceed highTier * 1.20
+    - OM Push and Notifications sites are excluded (same as Performance)
+    """
+    internal = _load_internal(internal_file)
+
+    campaign_col = _find_col(internal, "campaignName", "campaign_name")
+    site_id_col = _find_col(internal, "siteId", "site_id")
+    site_name_col = _find_col(internal, "siteName", "site_name")
+    if not campaign_col or not site_id_col:
+        raise ValueError("Internal file must contain campaignName and siteId (or campaign_name, site_id).")
+    if not site_name_col:
+        site_name_col = "siteName"
+
+    # Exclude OM Push / Notifications
+    internal = internal[~internal[campaign_col].apply(_is_excluded)].copy()
+    if site_name_col in internal.columns:
+        internal = internal[~internal[site_name_col].apply(_is_excluded)].copy()
+
+    _ensure_key(internal, campaign_col, site_id_col)
+
+    # Standardize column names
+    renames = {}
+    for c in internal.columns:
+        lc = _norm_col(c).lower()
+        if lc == "campaignid": renames[c] = "campaignId"
+        elif lc == "campaignname": renames[c] = "campaignName"
+        elif lc == "siteid": renames[c] = "siteId"
+        elif lc == "sitename": renames[c] = "siteName"
+        elif lc == "maxpreloads": renames[c] = "maxPreloads"
+        elif lc == "fillrate": renames[c] = "fillRate"
+        elif lc == "effectivebidfloor": renames[c] = "effectiveBidFloor"
+        elif lc == "bidrate": renames[c] = "bidRate"
+        elif lc == "dailycap": renames[c] = "dailyCap"
+        elif lc == "lowtier": renames[c] = "lowTier"
+        elif lc == "midtier": renames[c] = "midTier"
+        elif lc == "hightier": renames[c] = "highTier"
+        elif lc == "bidfloorgroupname": renames[c] = "bidFloorGroupName"
+        elif lc == "cvr": renames[c] = "cvr"
+        elif lc == "ecpp": renames[c] = "ecpp"
+        elif lc == "ecpi": renames[c] = "ecpi"
+        elif lc == "preloads": renames[c] = "preloads"
+        elif lc == "installs": renames[c] = "installs"
+        elif lc == "spend": renames[c] = "spend"
+        elif lc == "status": renames[c] = "status"
+    internal = internal.rename(columns=renames)
+
+    campaign_col = "campaignName" if "campaignName" in internal.columns else campaign_col
+    site_id_col = "siteId" if "siteId" in internal.columns else site_id_col
+    site_name_col = "siteName" if "siteName" in internal.columns else site_name_col
+
+    # Resolve metric columns
+    fill_rate_col = _find_col(internal, "fillRate", "fill_rate") or "fillRate"
+    max_preloads_col = _find_col(internal, "maxPreloads", "max_preloads")
+    spend_col = _find_col(internal, "spend", "Spend")
+    bid_rate_col = _find_col(internal, "bidRate", "bid_rate") or "bidRate"
+    high_tier_col = _find_col(internal, "highTier", "high_tier") or "highTier"
+    daily_cap_col = _find_col(internal, "dailyCap", "daily_cap")
+    cvr_col = _find_col(internal, "cvr", "CVR")
+    preloads_col = _find_col(internal, "preloads", "Preloads")
+    installs_col = _find_col(internal, "installs", "Installs")
+    status_col = _find_col(internal, "status", "Status")
+    bid_floor_col = _find_col(internal, "effectiveBidFloor", "effective_bid_floor") or "effectiveBidFloor"
+
+    # Coerce numerics
+    if not spend_col:
+        internal["spend"] = 0.0
+        spend_col = "spend"
+    else:
+        internal[spend_col] = pd.to_numeric(internal[spend_col], errors="coerce").fillna(0)
+
+    if fill_rate_col not in internal.columns:
+        internal[fill_rate_col] = np.nan
+    else:
+        internal[fill_rate_col] = pd.to_numeric(internal[fill_rate_col], errors="coerce")
+        if internal[fill_rate_col].max() > 1.5:
+            internal[fill_rate_col] = internal[fill_rate_col] / 100.0
+
+    if max_preloads_col:
+        internal[max_preloads_col] = pd.to_numeric(internal[max_preloads_col], errors="coerce").fillna(0)
+    else:
+        internal["maxPreloads"] = 0
+        max_preloads_col = "maxPreloads"
+
+    if bid_rate_col not in internal.columns:
+        internal[bid_rate_col] = np.nan
+    internal["bid_rate_num"] = pd.to_numeric(internal[bid_rate_col], errors="coerce")
+
+    if high_tier_col not in internal.columns:
+        internal[high_tier_col] = np.nan
+    internal["high_tier_num"] = pd.to_numeric(internal[high_tier_col], errors="coerce")
+
+    if bid_floor_col not in internal.columns:
+        internal[bid_floor_col] = np.nan
+
+    if cvr_col and cvr_col in internal.columns:
+        internal[cvr_col] = pd.to_numeric(internal[cvr_col], errors="coerce")
+
+    if not preloads_col:
+        internal["preloads"] = 0
+        preloads_col = "preloads"
+    else:
+        internal[preloads_col] = pd.to_numeric(internal[preloads_col], errors="coerce").fillna(0)
+
+    if not installs_col:
+        internal["installs"] = 0
+        installs_col = "installs"
+    else:
+        internal[installs_col] = pd.to_numeric(internal[installs_col], errors="coerce").fillna(0)
+
+    if not status_col:
+        internal["status"] = ""
+        status_col = "status"
+
+    # Drop rows with missing fillRate
+    internal = internal.dropna(subset=[fill_rate_col])
+
+    # Optionally merge advertiser ROI/ROAS columns for display
+    has_roi = False
+    roi_d7_label = "ROI D7"
+    roi_d2nd_label = "ROI D2nd"
+    if advertiser_file and kpi_col_d7_spec and kpi_col_d2nd_spec:
+        try:
+            advertiser = _load_advertiser(advertiser_file, None, None)
+            adv_campaign = _find_col(advertiser, "campaignName", "campaign_name")
+            adv_site_id = _find_col(advertiser, "siteId", "site_id")
+            if adv_campaign and adv_site_id:
+                _ensure_key(advertiser, adv_campaign, adv_site_id)
+                d7_idx, _ = col_name_or_letter_to_idx(advertiser, kpi_col_d7_spec)
+                d2nd_idx, _ = col_name_or_letter_to_idx(advertiser, kpi_col_d2nd_spec)
+                if kpi_mode == "roas":
+                    roi_d7_label, roi_d2nd_label = "ROAS D7", "ROAS D2nd"
+                    advertiser[roi_d7_label] = advertiser.iloc[:, d7_idx].apply(_parse_roas)
+                    advertiser[roi_d2nd_label] = advertiser.iloc[:, d2nd_idx].apply(_parse_roas)
+                else:
+                    advertiser[roi_d7_label] = advertiser.iloc[:, d7_idx].apply(_parse_pct)
+                    advertiser[roi_d2nd_label] = advertiser.iloc[:, d2nd_idx].apply(_parse_pct)
+                adv_merge = advertiser[["Key", roi_d7_label, roi_d2nd_label]].drop_duplicates(subset=["Key"], keep="first")
+                internal = internal.merge(adv_merge, on="Key", how="left")
+                has_roi = True
+        except Exception:
+            pass  # Advertiser file is optional; silently skip on error
+
+    # Sort by FillRate high to low
+    internal = internal.sort_values(fill_rate_col, ascending=False).reset_index(drop=True)
+
+    # Scale bid optimization
+    def scale_action_and_bid(row):
+        fill_rate = float(row[fill_rate_col]) if pd.notna(row[fill_rate_col]) else 0.0
+        spend = float(row[spend_col]) if pd.notna(row[spend_col]) else 0.0
+        max_preloads = float(row[max_preloads_col]) if pd.notna(row[max_preloads_col]) else 0.0
+        bid_rate = float(row["bid_rate_num"]) if pd.notna(row["bid_rate_num"]) else 0.0
+        high_tier = float(row["high_tier_num"]) if pd.notna(row["high_tier_num"]) else None
+
+        # CVR stored as decimal (0.25 → 25%) or already as percent (25)
+        cvr_raw = 0.0
+        if cvr_col and cvr_col in row.index and pd.notna(row[cvr_col]):
+            cvr_raw = float(row[cvr_col])
+        cvr_pct = cvr_raw * 100.0 if cvr_raw <= 1.0 else cvr_raw
+
+        # Safety filter: dailyCap already exists
+        has_daily_cap = False
+        if daily_cap_col and daily_cap_col in row.index:
+            dc_val = row[daily_cap_col]
+            if pd.notna(dc_val):
+                try:
+                    if float(dc_val) > 0:
+                        has_daily_cap = True
+                except (TypeError, ValueError):
+                    if str(dc_val).strip():
+                        has_daily_cap = True
+
+        # Safety filters
+        if spend < 100:
+            return "", np.nan
+        if max_preloads < 100:
+            return "", np.nan
+        if has_daily_cap:
+            return "", np.nan
+
+        # FillRate at capacity — no increase
+        if fill_rate >= 0.85:
+            return "", np.nan
+
+        # Base increase by FillRate band
+        if fill_rate >= 0.70:      # 70–85%
+            inc_pct = 0.10
+        elif fill_rate >= 0.50:    # 50–70%
+            inc_pct = 0.15
+        elif fill_rate >= 0.35:    # 35–50%
+            inc_pct = 0.20
+        elif fill_rate >= 0.20:    # 20–35%
+            inc_pct = 0.25
+        else:                      # 0–20%
+            inc_pct = 0.30
+
+        # CVR performance bonus
+        if cvr_pct > 20:
+            inc_pct += 0.05
+
+        new_bid = bid_rate * (1 + inc_pct)
+
+        # Guardrail: cap at highTier * 1.20
+        if high_tier is not None and new_bid > high_tier * 1.20:
+            new_bid = high_tier * 1.20
+
+        return f"Increase bid {int(round(inc_pct * 100))}%", round(new_bid, 2)
+
+    internal["Action"] = ""
+    internal["Recommended bid"] = np.nan
+    for i in internal.index:
+        act, rec = scale_action_and_bid(internal.loc[i])
+        internal.at[i, "Action"] = act
+        internal.at[i, "Recommended bid"] = rec
+
+    # Build output columns
+    id_col = _find_col(internal, "campaignId", "campaign_id") or campaign_col
+    sn_col = _find_col(internal, "siteName", "site_name") or site_name_col
+    sid_col = _find_col(internal, "siteId", "site_id") or site_id_col
+    maxp_col = _find_col(internal, "maxPreloads", "max_preloads")
+    cvr_out_col = _find_col(internal, "cvr", "CVR")
+    ecpp_col = _find_col(internal, "ecpp", "ECPP")
+    ecpi_col = _find_col(internal, "ecpi", "ECPI")
+    bfg_col = _find_col(internal, "bidFloorGroupName", "bid_floor_group_name")
+    dc_col = _find_col(internal, "dailyCap", "daily_cap")
+    lt_col = _find_col(internal, "lowTier", "low_tier")
+    mt_col = _find_col(internal, "midTier", "mid_tier")
+    ht_col = _find_col(internal, "highTier", "high_tier")
+
+    def _get(df, row, col, default=""):
+        if col and col in df.columns and col in row.index:
+            v = row[col]
+            return v if pd.notna(v) else default
+        return default
+
+    result_rows = []
+    for _, row in internal.iterrows():
+        r = {
+            "Key": row["Key"],
+            "campaignId": _get(internal, row, id_col),
+            "campaignName": row[campaign_col],
+            "siteId": _get(internal, row, sid_col),
+            "siteName": _get(internal, row, sn_col),
+            "status": _get(internal, row, status_col),
+            "spend": row[spend_col],
+            "preloads": _get(internal, row, preloads_col),
+            "maxPreloads": _get(internal, row, maxp_col),
+            "fillRate": row[fill_rate_col],
+            "installs": _get(internal, row, installs_col),
+            "cvr": _get(internal, row, cvr_out_col),
+            "ecpp": _get(internal, row, ecpp_col),
+            "ecpi": _get(internal, row, ecpi_col),
+            "bidFloorGroupName": _get(internal, row, bfg_col),
+            "effectiveBidFloor": _get(internal, row, bid_floor_col),
+            "bidRate": _get(internal, row, bid_rate_col),
+            "dailyCap": _get(internal, row, dc_col),
+            "lowTier": _get(internal, row, lt_col),
+            "midTier": _get(internal, row, mt_col),
+            "highTier": _get(internal, row, ht_col),
+            "Action": row["Action"],
+            "Recommended bid": row["Recommended bid"],
+        }
+        if has_roi:
+            r[roi_d7_label] = _get(internal, row, roi_d7_label)
+            r[roi_d2nd_label] = _get(internal, row, roi_d2nd_label)
+        result_rows.append(r)
+
+    out_df = pd.DataFrame(result_rows)
+
+    total_rows = len(out_df)
+    rows_actioned = int((out_df["Action"] != "").sum())
+    action_breakdown = out_df[out_df["Action"] != ""]["Action"].value_counts().to_dict()
+
+    # Build Excel
+    SCALE_ACTION_FILL = "C6EFCE"  # Light green for bid-increase rows
+
+    buf = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Scale Optimization"
+
+    for r_idx, row_data in enumerate(dataframe_to_rows(out_df, index=False, header=True), 1):
+        for c_idx, value in enumerate(row_data, 1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            if r_idx == 1:
+                cell.fill = PatternFill(start_color=HEADER_FILL, end_color=HEADER_FILL, fill_type="solid")
+                cell.font = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+            else:
+                cell.font = Font(name="Arial", size=9)
+                col_name = out_df.columns[c_idx - 1] if c_idx <= len(out_df.columns) else ""
+                action_val = out_df.iloc[r_idx - 2]["Action"] if r_idx > 1 else ""
+                if action_val and col_name in ("Action", "Recommended bid"):
+                    cell.fill = PatternFill(start_color=SCALE_ACTION_FILL, end_color=SCALE_ACTION_FILL, fill_type="solid")
+                    if col_name == "Action":
+                        cell.font = Font(name="Arial", size=9, bold=True)
+
+    for c_idx in range(1, len(out_df.columns) + 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(c_idx)].width = 14
+
+    money_cols = {"spend", "ecpp", "ecpi", "effectiveBidFloor", "bidRate", "Recommended bid", "lowTier", "midTier", "highTier"}
+    pct_cols = {"fillRate", "cvr"}
+    if has_roi:
+        pct_cols.add(roi_d7_label)
+        pct_cols.add(roi_d2nd_label)
+    int_cols = {"preloads", "maxPreloads", "installs", "dailyCap"}
+
+    for r in range(2, ws.max_row + 1):
+        for c_idx, col_name in enumerate(out_df.columns, 1):
+            cell = ws.cell(row=r, column=c_idx)
+            if col_name in money_cols and cell.value is not None and cell.value != "":
+                try:
+                    v = float(cell.value)
+                    cell.number_format = '"$"#,##0.00'
+                    cell.value = v
+                except (TypeError, ValueError):
+                    pass
+            elif col_name in pct_cols and cell.value is not None and cell.value != "":
+                try:
+                    v = float(cell.value)
+                    if v <= 1:
+                        cell.number_format = '0.00%'
+                    else:
+                        cell.value = v / 100.0
+                        cell.number_format = '0.00%'
+                except (TypeError, ValueError):
+                    pass
+            elif col_name in int_cols and cell.value is not None and cell.value != "":
+                try:
+                    cell.value = int(float(cell.value))
+                    cell.number_format = "#,##0"
+                except (TypeError, ValueError):
+                    pass
+            if col_name in ("campaignId", "siteId"):
+                cell.number_format = "@"
+
+    wb.save(buf)
+    buf.seek(0)
+
+    summary = {
+        "total_rows": int(total_rows),
+        "rows_actioned": rows_actioned,
+        "rows_disregarded": 0,
+        "rows_with_cap": 0,
+        "roi_d2nd_col": roi_d2nd_label if has_roi else "",
+        "action_breakdown": action_breakdown,
+        "segment_breakdown": {},
+        "optimization_mode": "scale",
+    }
+    return buf, summary

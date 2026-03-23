@@ -9,7 +9,7 @@ import uuid
 from flask import Flask, request, jsonify, send_file, render_template
 from werkzeug.utils import secure_filename
 
-from optimizer import run_optimization, col_letter_to_idx
+from optimizer import run_optimization, run_scale_optimization, col_letter_to_idx
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -110,6 +110,68 @@ def run():
                 "roi_d2nd_col": summary.get("roi_d2nd_col", ""),
                 "action_breakdown": summary.get("action_breakdown") or {},
                 "segment_breakdown": summary.get("segment_breakdown") or {},
+            },
+            "download_id": download_id,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if internal_path and os.path.isfile(internal_path):
+            try:
+                os.unlink(internal_path)
+            except OSError:
+                pass
+        if advertiser_path and os.path.isfile(advertiser_path):
+            try:
+                os.unlink(advertiser_path)
+            except OSError:
+                pass
+
+
+@app.route("/run_scale", methods=["POST"])
+def run_scale():
+    files = request.files
+    if "internal_file" not in files or not files["internal_file"].filename:
+        return jsonify({"error": "Please upload the Internal Campaign Data (.xlsx) file."}), 400
+    internal_file = files["internal_file"]
+    if not internal_file.filename.lower().endswith(".xlsx"):
+        return jsonify({"error": "Internal file must be .xlsx"}), 400
+
+    advertiser_file = files.get("advertiser_file")
+    has_advertiser = advertiser_file and advertiser_file.filename and advertiser_file.filename.lower().endswith(".csv")
+
+    internal_path = None
+    advertiser_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as f:
+            f.write(internal_file.read())
+            internal_path = f.name
+        if has_advertiser:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as f:
+                f.write(advertiser_file.read())
+                advertiser_path = f.name
+
+        output_bytes, summary = run_scale_optimization(
+            internal_file=internal_path,
+            advertiser_file=advertiser_path,
+        )
+        report_bytes = output_bytes.getvalue()
+        download_id = str(uuid.uuid4())
+        _report_store[download_id] = report_bytes
+        if len(_report_store) > 10:
+            for k in list(_report_store.keys())[:-10]:
+                del _report_store[k]
+
+        return jsonify({
+            "summary": {
+                "total_rows": summary.get("total_rows", 0),
+                "rows_actioned": summary.get("rows_actioned", 0),
+                "rows_disregarded": 0,
+                "rows_with_cap": 0,
+                "roi_d2nd_col": summary.get("roi_d2nd_col", ""),
+                "action_breakdown": summary.get("action_breakdown") or {},
+                "segment_breakdown": {},
+                "optimization_mode": "scale",
             },
             "download_id": download_id,
         })

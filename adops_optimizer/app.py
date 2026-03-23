@@ -9,12 +9,12 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QDoubleSpinBox, QFileDialog,
     QProgressBar, QTableWidget, QTableWidgetItem, QGroupBox,
-    QMessageBox, QSplitter, QFrame, QGridLayout,
+    QMessageBox, QSplitter, QFrame, QGridLayout, QRadioButton, QButtonGroup,
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont, QColor, QPalette
 
-from optimizer import run_optimization, col_letter_to_idx
+from optimizer import run_optimization, run_scale_optimization, col_letter_to_idx
 
 
 # --- Background worker ---
@@ -42,6 +42,27 @@ class OptimizationWorker(QThread):
                 kpi_col_d2nd_idx=self.kpi_col_d2nd_idx,
                 kpi_d7_pct=self.kpi_d7_pct,
                 kpi_d2nd_pct=self.kpi_d2nd_pct,
+            )
+            self.finished.emit(output_bytes, summary)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ScaleOptimizationWorker(QThread):
+    """Runs run_scale_optimization() in a background thread."""
+    finished = pyqtSignal(object, dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, internal_file, advertiser_file=None):
+        super().__init__()
+        self.internal_file = internal_file
+        self.advertiser_file = advertiser_file
+
+    def run(self):
+        try:
+            output_bytes, summary = run_scale_optimization(
+                internal_file=self.internal_file,
+                advertiser_file=self.advertiser_file if self.advertiser_file else None,
             )
             self.finished.emit(output_bytes, summary)
         except Exception as e:
@@ -92,7 +113,22 @@ class MainWindow(QMainWindow):
         line.setStyleSheet("background-color: #ddd;")
         main_layout.addWidget(line)
 
-        # --- 2. File selection group ---
+        # --- 2. Mode selector ---
+        mode_group = QGroupBox("Optimization Mode")
+        mode_layout = QHBoxLayout(mode_group)
+        self.mode_btn_group = QButtonGroup(self)
+        self.radio_performance = QRadioButton("Performance Optimization")
+        self.radio_scale = QRadioButton("Scale Optimization")
+        self.radio_performance.setChecked(True)
+        self.mode_btn_group.addButton(self.radio_performance, 0)
+        self.mode_btn_group.addButton(self.radio_scale, 1)
+        mode_layout.addWidget(self.radio_performance)
+        mode_layout.addWidget(self.radio_scale)
+        mode_layout.addStretch()
+        self.radio_performance.toggled.connect(self._on_mode_changed)
+        main_layout.addWidget(mode_group)
+
+        # --- 3. File selection group ---
         file_group = QGroupBox("Input Files")
         file_layout = QVBoxLayout(file_group)
         file_layout.setSpacing(10)
@@ -112,9 +148,9 @@ class MainWindow(QMainWindow):
         file_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
-        lbl_advertiser = QLabel("Advertiser Performance Report (.csv)")
-        lbl_advertiser.setFixedWidth(220)
-        row2.addWidget(lbl_advertiser)
+        self.lbl_advertiser = QLabel("Advertiser Performance Report (.csv)")
+        self.lbl_advertiser.setFixedWidth(220)
+        row2.addWidget(self.lbl_advertiser)
         self.advertiser_edit = QLineEdit()
         self.advertiser_edit.setReadOnly(True)
         self.advertiser_edit.setPlaceholderText("No file selected")
@@ -127,8 +163,9 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(file_group)
 
-        # --- 3. KPI settings group ---
-        kpi_group = QGroupBox("KPI Settings")
+        # --- 4. KPI settings group (hidden in Scale mode) ---
+        self.kpi_group = QGroupBox("KPI Settings")
+        kpi_group = self.kpi_group
         kpi_layout = QGridLayout(kpi_group)
 
         kpi_layout.addWidget(QLabel("ROI D7 Column Letter"), 0, 0)
@@ -279,6 +316,14 @@ class MainWindow(QMainWindow):
             self.advertiser_path = path
             self.advertiser_edit.setText(path)
 
+    def _on_mode_changed(self):
+        is_performance = self.radio_performance.isChecked()
+        self.kpi_group.setVisible(is_performance)
+        if is_performance:
+            self.lbl_advertiser.setText("Advertiser Performance Report (.csv)")
+        else:
+            self.lbl_advertiser.setText("Advertiser Performance Report (.csv) — optional")
+
     def _validate(self):
         if not self.internal_path or not self.internal_path.strip():
             QMessageBox.warning(self, "Validation", "Please select the Internal Campaign Data (.xlsx) file.")
@@ -286,26 +331,33 @@ class MainWindow(QMainWindow):
         if not os.path.isfile(self.internal_path):
             QMessageBox.warning(self, "Validation", "Internal Campaign Data file does not exist.")
             return False
-        if not self.advertiser_path or not self.advertiser_path.strip():
-            QMessageBox.warning(self, "Validation", "Please select the Advertiser Performance Report (.csv) file.")
-            return False
-        if not os.path.isfile(self.advertiser_path):
-            QMessageBox.warning(self, "Validation", "Advertiser Performance Report file does not exist.")
-            return False
-        d7 = self.d7_col_edit.text().strip().upper()
-        if len(d7) != 1 or not d7.isalpha():
-            QMessageBox.warning(self, "Validation", "ROI D7 Column Letter must be a single letter A–Z.")
-            return False
-        d2nd = self.d2nd_col_edit.text().strip().upper()
-        if len(d2nd) != 1 or not d2nd.isalpha():
-            QMessageBox.warning(self, "Validation", "ROI D2nd Column Letter must be a single letter A–Z.")
-            return False
-        if self.kpi_d7_spin.value() <= 0:
-            QMessageBox.warning(self, "Validation", "D7 KPI Target must be greater than 0.")
-            return False
-        if self.kpi_d2nd_spin.value() <= 0:
-            QMessageBox.warning(self, "Validation", "D2nd KPI Target must be greater than 0.")
-            return False
+        is_performance = self.radio_performance.isChecked()
+        if is_performance:
+            if not self.advertiser_path or not self.advertiser_path.strip():
+                QMessageBox.warning(self, "Validation", "Please select the Advertiser Performance Report (.csv) file.")
+                return False
+            if not os.path.isfile(self.advertiser_path):
+                QMessageBox.warning(self, "Validation", "Advertiser Performance Report file does not exist.")
+                return False
+            d7 = self.d7_col_edit.text().strip().upper()
+            if len(d7) != 1 or not d7.isalpha():
+                QMessageBox.warning(self, "Validation", "ROI D7 Column Letter must be a single letter A–Z.")
+                return False
+            d2nd = self.d2nd_col_edit.text().strip().upper()
+            if len(d2nd) != 1 or not d2nd.isalpha():
+                QMessageBox.warning(self, "Validation", "ROI D2nd Column Letter must be a single letter A–Z.")
+                return False
+            if self.kpi_d7_spin.value() <= 0:
+                QMessageBox.warning(self, "Validation", "D7 KPI Target must be greater than 0.")
+                return False
+            if self.kpi_d2nd_spin.value() <= 0:
+                QMessageBox.warning(self, "Validation", "D2nd KPI Target must be greater than 0.")
+                return False
+        else:
+            # Scale mode: advertiser file is optional but must exist if provided
+            if self.advertiser_path and self.advertiser_path.strip() and not os.path.isfile(self.advertiser_path):
+                QMessageBox.warning(self, "Validation", "Advertiser Performance Report file does not exist.")
+                return False
         return True
 
     def _on_run_clicked(self):
@@ -313,24 +365,32 @@ class MainWindow(QMainWindow):
             return
         self.run_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
-        d7_letter = self.d7_col_edit.text().strip().upper()
-        d2nd_letter = self.d2nd_col_edit.text().strip().upper()
-        try:
-            kpi_col_d7_idx = col_letter_to_idx(d7_letter)
-            kpi_col_d2nd_idx = col_letter_to_idx(d2nd_letter)
-        except Exception as e:
-            self.progress_bar.setVisible(False)
-            self.run_btn.setEnabled(True)
-            QMessageBox.critical(self, "Error", f"Invalid column letter: {e}")
-            return
-        self.worker = OptimizationWorker(
-            internal_file=self.internal_path,
-            advertiser_file=self.advertiser_path,
-            kpi_col_d7_idx=kpi_col_d7_idx,
-            kpi_col_d2nd_idx=kpi_col_d2nd_idx,
-            kpi_d7_pct=self.kpi_d7_spin.value(),
-            kpi_d2nd_pct=self.kpi_d2nd_spin.value(),
-        )
+        is_performance = self.radio_performance.isChecked()
+        if is_performance:
+            d7_letter = self.d7_col_edit.text().strip().upper()
+            d2nd_letter = self.d2nd_col_edit.text().strip().upper()
+            try:
+                kpi_col_d7_idx = col_letter_to_idx(d7_letter)
+                kpi_col_d2nd_idx = col_letter_to_idx(d2nd_letter)
+            except Exception as e:
+                self.progress_bar.setVisible(False)
+                self.run_btn.setEnabled(True)
+                QMessageBox.critical(self, "Error", f"Invalid column letter: {e}")
+                return
+            self.worker = OptimizationWorker(
+                internal_file=self.internal_path,
+                advertiser_file=self.advertiser_path,
+                kpi_col_d7_idx=kpi_col_d7_idx,
+                kpi_col_d2nd_idx=kpi_col_d2nd_idx,
+                kpi_d7_pct=self.kpi_d7_spin.value(),
+                kpi_d2nd_pct=self.kpi_d2nd_spin.value(),
+            )
+        else:
+            advertiser = self.advertiser_path if (self.advertiser_path and os.path.isfile(self.advertiser_path)) else None
+            self.worker = ScaleOptimizationWorker(
+                internal_file=self.internal_path,
+                advertiser_file=advertiser,
+            )
         self.worker.finished.connect(self._on_success)
         self.worker.error.connect(self._on_error)
         self.worker.start()
@@ -342,7 +402,9 @@ class MainWindow(QMainWindow):
         self._populate_results(summary)
         self.results_group.setVisible(True)
         actioned = summary.get("rows_actioned", 0)
-        QMessageBox.information(self, "Complete", f"Optimization complete! {actioned} sites actioned.")
+        mode = summary.get("optimization_mode", "performance")
+        label = "Scale Optimization" if mode == "scale" else "Performance Optimization"
+        QMessageBox.information(self, "Complete", f"{label} complete! {actioned} sites actioned.")
 
     def _on_error(self, message):
         self.progress_bar.setVisible(False)

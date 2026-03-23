@@ -203,6 +203,20 @@
     <p class="subtitle">Digital Turbine Preload Campaign Optimizer</p>
     <hr>
 
+    <div class="group" style="padding-bottom:12px;">
+      <div class="group-title">Optimization Mode</div>
+      <div style="display:flex;gap:24px;align-items:center;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:bold;">
+          <input type="radio" name="opt_mode" id="modePerformance" value="performance" checked>
+          Performance Optimization
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:bold;">
+          <input type="radio" name="opt_mode" id="modeScale" value="scale">
+          Scale Optimization
+        </label>
+      </div>
+    </div>
+
     <form id="form" class="group">
       <div class="group-title">Input Files</div>
       <div class="file-row">
@@ -210,12 +224,12 @@
         <input type="file" id="internal_file" name="internal_file" accept=".xlsx" required>
       </div>
       <div class="file-row">
-        <label for="advertiser_file">Advertiser Performance Report (.csv)</label>
-        <input type="file" id="advertiser_file" name="advertiser_file" accept=".csv" required>
+        <label for="advertiser_file" id="advertiserLabel">Advertiser Performance Report (.csv)</label>
+        <input type="file" id="advertiser_file" name="advertiser_file" accept=".csv">
       </div>
     </form>
 
-    <div class="group">
+    <div class="group" id="kpiGroup">
       <div class="group-title">KPI Settings</div>
       <div class="kpi-grid">
         <label for="d7_col">ROI D7 Column Letter</label>
@@ -226,6 +240,15 @@
         <input type="number" id="kpi_d7" name="kpi_d7" min="0" max="100" step="0.01" value="3.36">
         <label for="kpi_d2nd">D2nd KPI Target (%)</label>
         <input type="number" id="kpi_d2nd" name="kpi_d2nd" min="0" max="100" step="0.01" value="13.36">
+      </div>
+    </div>
+
+    <div id="scaleNote" class="group" style="display:none;background:#EFF6FF;border-color:#BFDBFE;">
+      <div style="color:#1D4ED8;font-size:9pt;">
+        <strong>Scale Optimization</strong> — Only the internal file is required.
+        The advertiser file is optional (includes ROI/ROAS columns in the report if provided).
+        Bids are increased based on FillRate bands. Sites with spend &lt; $100,
+        maxPreloads &lt; 100, or an existing dailyCap are excluded.
       </div>
     </div>
 
@@ -283,54 +306,76 @@
   </div>
 
   <script>
-    const form = document.getElementById('form');
     const runBtn = document.getElementById('runBtn');
     const progress = document.getElementById('progress');
     const results = document.getElementById('results');
     const saveBtn = document.getElementById('saveBtn');
+    const kpiGroup = document.getElementById('kpiGroup');
+    const scaleNote = document.getElementById('scaleNote');
+    const advertiserLabel = document.getElementById('advertiserLabel');
+
+    // Mode toggle
+    document.querySelectorAll('input[name="opt_mode"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const isScale = document.getElementById('modeScale').checked;
+        kpiGroup.style.display = isScale ? 'none' : '';
+        scaleNote.style.display = isScale ? '' : 'none';
+        advertiserLabel.textContent = isScale
+          ? 'Advertiser Performance Report (.csv) — optional'
+          : 'Advertiser Performance Report (.csv)';
+      });
+    });
 
     runBtn.addEventListener('click', async () => {
+      const isScale = document.getElementById('modeScale').checked;
       const internal = document.getElementById('internal_file').files[0];
       const advertiser = document.getElementById('advertiser_file').files[0];
-      const d7 = document.getElementById('d7_col').value.trim().toUpperCase();
-      const d2nd = document.getElementById('d2nd_col').value.trim().toUpperCase();
-      const kpiD7 = document.getElementById('kpi_d7').value;
-      const kpiD2nd = document.getElementById('kpi_d2nd').value;
 
       if (!internal) {
         alert('Please select the Internal Campaign Data (.xlsx) file.');
         return;
       }
-      if (!advertiser) {
-        alert('Please select the Advertiser Performance Report (.csv) file.');
-        return;
-      }
-      if (d7.length !== 1 || !/^[A-Z]$/.test(d7)) {
-        alert('ROI D7 Column Letter must be a single letter A–Z.');
-        return;
-      }
-      if (d2nd.length !== 1 || !/^[A-Z]$/.test(d2nd)) {
-        alert('ROI D2nd Column Letter must be a single letter A–Z.');
-        return;
-      }
-      if (parseFloat(kpiD7) <= 0 || parseFloat(kpiD2nd) <= 0) {
-        alert('KPI targets must be greater than 0.');
-        return;
-      }
 
+      let endpoint = '/run';
       const fd = new FormData();
       fd.append('internal_file', internal);
-      fd.append('advertiser_file', advertiser);
-      fd.append('d7_col', d7);
-      fd.append('d2nd_col', d2nd);
-      fd.append('kpi_d7', kpiD7);
-      fd.append('kpi_d2nd', kpiD2nd);
+
+      if (isScale) {
+        endpoint = '/run_scale';
+        if (advertiser) fd.append('advertiser_file', advertiser);
+      } else {
+        if (!advertiser) {
+          alert('Please select the Advertiser Performance Report (.csv) file.');
+          return;
+        }
+        const d7 = document.getElementById('d7_col').value.trim().toUpperCase();
+        const d2nd = document.getElementById('d2nd_col').value.trim().toUpperCase();
+        const kpiD7 = document.getElementById('kpi_d7').value;
+        const kpiD2nd = document.getElementById('kpi_d2nd').value;
+        if (d7.length !== 1 || !/^[A-Z]$/.test(d7)) {
+          alert('ROI D7 Column Letter must be a single letter A–Z.');
+          return;
+        }
+        if (d2nd.length !== 1 || !/^[A-Z]$/.test(d2nd)) {
+          alert('ROI D2nd Column Letter must be a single letter A–Z.');
+          return;
+        }
+        if (parseFloat(kpiD7) <= 0 || parseFloat(kpiD2nd) <= 0) {
+          alert('KPI targets must be greater than 0.');
+          return;
+        }
+        fd.append('advertiser_file', advertiser);
+        fd.append('d7_col', d7);
+        fd.append('d2nd_col', d2nd);
+        fd.append('kpi_d7', kpiD7);
+        fd.append('kpi_d2nd', kpiD2nd);
+      }
 
       runBtn.disabled = true;
       progress.classList.add('visible');
 
       try {
-        const r = await fetch('/run', { method: 'POST', body: fd });
+        const r = await fetch(endpoint, { method: 'POST', body: fd });
         const data = await r.json();
         if (!r.ok) {
           alert(data.error || 'Run failed.');
@@ -341,7 +386,7 @@
         document.getElementById('cardActioned').textContent = summary.rows_actioned ?? 0;
         document.getElementById('cardDisregarded').textContent = summary.rows_disregarded ?? 0;
         document.getElementById('cardCap').textContent = summary.rows_with_cap ?? 0;
-        document.getElementById('cardKpiCol').textContent = summary.roi_d2nd_col ?? '–';
+        document.getElementById('cardKpiCol').textContent = summary.roi_d2nd_col || '–';
 
         const actionBreakdown = summary.action_breakdown || {};
         const actionRows = Object.entries(actionBreakdown).sort((a, b) => b[1] - a[1]);
@@ -360,7 +405,8 @@
         saveBtn.href = '/download/' + data.download_id;
         saveBtn.style.display = 'inline-block';
         results.classList.add('visible');
-        alert('Optimization complete! ' + (summary.rows_actioned ?? 0) + ' sites actioned.');
+        const modeLabel = isScale ? 'Scale Optimization' : 'Performance Optimization';
+        alert(modeLabel + ' complete! ' + (summary.rows_actioned ?? 0) + ' sites actioned.');
       } catch (e) {
         alert('Error: ' + (e.message || String(e)));
       } finally {
