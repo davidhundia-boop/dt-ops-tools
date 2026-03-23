@@ -290,9 +290,9 @@
           <div class="hint">Raw UUID or already-hashed SHA1 value.</div>
         </div>
         <div class="field-group">
-          <label for="click-id">Test Click ID</label>
-          <input type="text" id="click-id" />
-          <div class="hint">Replaces <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:0.75rem;">[ClickID]</code> placeholder.</div>
+          <label for="requester-name">Your Name</label>
+          <input type="text" id="requester-name" placeholder="e.g. David" />
+          <div class="hint">Click ID will be generated as <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:0.75rem;">name + random number</code></div>
         </div>
       </div>
 
@@ -354,7 +354,10 @@
     async function buildLink() {
       const rawLink   = document.getElementById('tracking-input').value.trim();
       const deviceId  = document.getElementById('device-id').value.trim();
-      const clickIdVal = document.getElementById('click-id').value.trim() || document.getElementById('click-id').placeholder || 'DTest0101';
+      const requesterName = document.getElementById('requester-name').value.trim();
+      const clickIdVal = requesterName
+        ? requesterName.toLowerCase() + (Math.floor(Math.random() * 90) + 10)
+        : 'test' + (Math.floor(Math.random() * 90) + 10);
 
       const outputSection = document.getElementById('output-section');
       const alertContainer = document.getElementById('alert-container');
@@ -568,14 +571,6 @@
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
     }
-
-    // ── Populate default click ID (DTestDDMM) ─────────────────────────────────
-    (function() {
-      const now = new Date();
-      const dd = String(now.getDate()).padStart(2, '0');
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      document.getElementById('click-id').value = `DTest${dd}${mm}`;
-    })();
 
     // Allow Ctrl+Enter to build
     document.addEventListener('keydown', e => {

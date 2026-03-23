@@ -11,8 +11,10 @@ When the user pastes a tracking link (with or without a device ID), **immediatel
 
 **Step 2 — Run the script:**
 ```bash
-python builder.py --link "<link>" --device-id "<device_id>"
-# Or with a custom click ID:
+# Always pass --name with the requester's first name — click ID is generated as name+random (e.g. david47)
+python builder.py --link "<link>" --device-id "<device_id>" --name "<requester_first_name>"
+
+# Override click ID directly only if explicitly requested:
 python builder.py --link "<link>" --device-id "<device_id>" --click-id "<click_id>"
 ```
 
@@ -27,5 +29,5 @@ python builder.py --link "<link>" --device-id "<device_id>" --click-id "<click_i
 - **Unified detection** — presence of `id2` param in the URL
 - **id2 values** — `dV9XX0xY` (ODS, `[...]` placeholder style) / `ckFCRVBW` (DSP, `{...}` placeholder style)
 - **Kochava hashing** — triggered by `device_id_is_hashed=true` + `device_hash_method=sha1` in the URL params
-- **Default click ID** — `DTestDDMM` (date-based, e.g. `DTest2303`), auto-generated at runtime
+- **Click ID** — generated from requester name + random 2-digit number, e.g. `david47`. Pass via `--name <name>`. Use `--click-id` only to override manually.
 - **Embedded `[ClickID]` replacement** — applied everywhere across all param values

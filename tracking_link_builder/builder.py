@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import random
 import re
 from datetime import date
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
@@ -28,7 +29,12 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 ODS_ID2_VALUE = "dV9XX0xY"   # ODS — placeholder style: [...]
 DSP_ID2_VALUE = "ckFCRVBW"   # DSP — placeholder style: {...}
 
-DEFAULT_CLICK_ID = f"DTest{date.today().strftime('%d%m')}"  # e.g. DTest2303
+DEFAULT_CLICK_ID = f"DTest{date.today().strftime('%d%m')}"  # fallback if no name given
+
+
+def click_id_from_name(name: str) -> str:
+    """Generate a click ID from a requester name, e.g. 'David' → 'david47'."""
+    return f"{name.strip().lower()}{random.randint(10, 99)}"
 
 # ── MMP detection ─────────────────────────────────────────────────────────────
 # Checked in order; first match wins.
@@ -353,15 +359,25 @@ Examples:
     ap.add_argument("--link", required=True, help="Raw tracking link")
     ap.add_argument("--device-id", required=True, help="GAID/AAID (UUID or SHA-1)")
     ap.add_argument(
+        "--name",
+        help="Requester name — generates click ID as <name><random> e.g. david47",
+    )
+    ap.add_argument(
         "--click-id",
-        default=DEFAULT_CLICK_ID,
-        help=f"Test click ID (default: {DEFAULT_CLICK_ID})",
+        help="Override click ID directly (takes precedence over --name)",
     )
 
     args = ap.parse_args()
 
+    if args.click_id:
+        click_id_val = args.click_id
+    elif args.name:
+        click_id_val = click_id_from_name(args.name)
+    else:
+        click_id_val = DEFAULT_CLICK_ID
+
     try:
-        result = build_link(args.link, args.device_id, args.click_id)
+        result = build_link(args.link, args.device_id, click_id_val)
     except ValueError as e:
         print(f"\n[ERROR] {e}\n")
         raise SystemExit(1)
