@@ -391,11 +391,19 @@
       const integrationIsODT = isODT(pid);
       const changes = [];
 
-      // ── Determine hashing requirement for any sha1_ param ─────────────────
+      // ── Determine hashing requirement ─────────────────────────────────────
       let resolvedDeviceId = deviceId;
 
-      // Collect all param names that contain "sha1"
-      const sha1Params = [...params.keys()].filter(k => k.toLowerCase().includes('sha1'));
+      // Collect all param names that contain "sha1" in the key
+      let sha1Params = [...params.keys()].filter(k => k.toLowerCase().includes('sha1'));
+
+      // Kochava: hashing signalled by device_id_is_hashed=true + device_hash_method=sha1
+      const kochavaHashed =
+        (params.get('device_id_is_hashed') || '').toLowerCase() === 'true' &&
+        (params.get('device_hash_method') || '').toLowerCase() === 'sha1';
+      if (kochavaHashed && !sha1Params.includes('device_id')) {
+        sha1Params = [...sha1Params, 'device_id'];
+      }
 
       if (sha1Params.length > 0) {
         // sha1 required
@@ -423,8 +431,11 @@
         resolvedDeviceId = deviceId.trim();
       }
 
-      // ── Shared helper: find the click ID param (handles clickid and click_id variants) ──
-      const clickIdKey = [...params.keys()].find(k => k.toLowerCase().replace('_', '') === 'clickid') || null;
+      // ── Shared helper: find the click ID param (clickid / click_id / ~click_id) ──
+      const clickIdKey = [...params.keys()].find(k => {
+        const kl = k.toLowerCase();
+        return kl === 'clickid' || kl === 'click_id' || kl === '~click_id';
+      }) || null;
 
       // ── Apply rules ───────────────────────────────────────────────────────
       if (!integrationIsODT) {
@@ -444,7 +455,7 @@
 
         // 3. Replace plain advertising ID params (non-sha1) if sha1 params were absent
         if (sha1Params.length === 0) {
-          const plainAdIds = ['advertising_id', 'android_id', 'device_id', 'idfa', 'gaid', 'aaid', 'af_idfa', 'af_android_id']
+          const plainAdIds = ['advertising_id', 'android_id', 'device_id', 'idfa', 'gaid', 'aaid', '$aaid', 'af_idfa', 'af_android_id']
             .filter(k => params.has(k));
           for (const key of plainAdIds) {
             params.set(key, resolvedDeviceId);
@@ -469,13 +480,23 @@
 
         // 3. Replace plain advertising ID params if sha1 params were absent
         if (sha1Params.length === 0) {
-          const plainAdIds = ['advertising_id', 'android_id', 'device_id', 'idfa', 'gaid', 'aaid', 'af_idfa', 'af_android_id']
+          const plainAdIds = ['advertising_id', 'android_id', 'device_id', 'idfa', 'gaid', 'aaid', '$aaid', 'af_idfa', 'af_android_id']
             .filter(k => params.has(k));
           for (const key of plainAdIds) {
             params.set(key, resolvedDeviceId);
             changes.push({ param: key, value: resolvedDeviceId, desc: 'Raw Device ID' });
           }
         }
+      }
+
+      // ── id2 → Unified hardcode (always, regardless of integration type) ──────
+      if (params.has('id2')) {
+        const currentId2 = params.get('id2');
+        const isDSP = currentId2.includes('{');
+        const id2Val = isDSP ? 'ckFCRVBW' : 'dV9XX0xY';
+        const id2Type = isDSP ? 'DSP' : 'ODS';
+        params.set('id2', id2Val);
+        changes.push({ param: 'id2', value: id2Val, desc: `Unified id2 hardcoded (${id2Type})` });
       }
 
       // ── Reconstruct URL ───────────────────────────────────────────────────
@@ -503,6 +524,11 @@
       const integrationLabel = integrationIsODT ? 'OneDigitalTurbine' : 'Legacy';
       const integrationClass = integrationIsODT ? 'badge-odt' : 'badge-legacy';
       badgesEl.innerHTML = `<span class="badge ${integrationClass}">${integrationLabel}</span>`;
+      if (params.has('id2')) {
+        const id2Change = changes.find(c => c.param === 'id2');
+        const id2Type = id2Change ? id2Change.desc.match(/\((\w+)\)/)?.[1] || 'Unified' : 'Unified';
+        badgesEl.innerHTML += `<span class="badge badge-odt">Unified (${id2Type})</span>`;
+      }
       if (pid) badgesEl.innerHTML += `<span class="badge badge-legacy" style="background:rgba(139,148,158,0.1);color:#8b94a0;border-color:rgba(139,148,158,0.2);">pid: ${escapeHtml(pid)}</span>`;
       if (sha1Params.length > 0) badgesEl.innerHTML += `<span class="badge badge-hashed">SHA-1 Hashed</span>`;
 
