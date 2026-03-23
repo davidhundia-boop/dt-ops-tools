@@ -9,7 +9,7 @@ import uuid
 from flask import Flask, request, jsonify, send_file, render_template
 from werkzeug.utils import secure_filename
 
-from optimizer import run_optimization, run_scale_optimization, col_letter_to_idx
+from optimizer import run_optimization, run_scale_optimization, xlsx_to_csv, col_letter_to_idx
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -201,6 +201,22 @@ def download(download_id):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
         download_name="optimization_output.xlsx",
+    )
+
+
+@app.route("/download/<download_id>/csv")
+def download_csv(download_id):
+    """Download the report as CSV instead of Excel."""
+    if download_id not in _report_store:
+        return "Report not found or expired.", 404
+    from io import BytesIO
+    xlsx_buf = BytesIO(_report_store.pop(download_id, b""))
+    csv_buf = xlsx_to_csv(xlsx_buf)
+    return send_file(
+        csv_buf,
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="optimization_output.csv",
     )
 
 

@@ -1125,3 +1125,25 @@ def run_scale_optimization(
         "optimization_mode": "scale",
     }
     return buf, summary
+
+
+def xlsx_to_csv(xlsx_bytes):
+    """
+    Convert an Excel BytesIO (from run_optimization or run_scale_optimization)
+    to a CSV BytesIO. Reads the first sheet and writes all rows as CSV.
+    Returns a BytesIO containing UTF-8 CSV data.
+    """
+    import csv
+    xlsx_bytes.seek(0)
+    wb = openpyxl.load_workbook(xlsx_bytes, read_only=True, data_only=True)
+    ws = wb.active
+    csv_buf = BytesIO()
+    import io
+    text_buf = io.StringIO()
+    writer = csv.writer(text_buf)
+    for row in ws.iter_rows(values_only=True):
+        writer.writerow(row)
+    wb.close()
+    csv_buf.write(text_buf.getvalue().encode("utf-8"))
+    csv_buf.seek(0)
+    return csv_buf
