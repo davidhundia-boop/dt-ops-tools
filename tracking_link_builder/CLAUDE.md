@@ -1,15 +1,28 @@
 # Agent Instructions — Tracking Link Builder
 
-When the user refers to the **Link Builder**, the **test link builder**, or asks to build/fix/update tracking links, go directly to:
+## What to do when the user gives you a tracking link
 
+When the user pastes a tracking link (with or without a device ID), **immediately run `builder.py`** — do not ask questions, do not analyse the link, do not describe it.
+
+**Step 1 — Collect inputs:**
+- Tracking link → required (user has provided it)
+- Device ID → required. If not provided, ask for it once: _"Please share your device ID (GAID/AAID UUID)."_ Nothing else.
+- Click ID → optional, default is auto-generated (`DTestDDMM`). Do not ask for it unless user mentions it.
+
+**Step 2 — Run the script:**
+```bash
+python builder.py --link "<link>" --device-id "<device_id>"
+# Or with a custom click ID:
+python builder.py --link "<link>" --device-id "<device_id>" --click-id "<click_id>"
 ```
-tracking_link_builder/builder.py
-```
 
-This is the single source of truth for all link-building logic. `main.py` is just a thin CLI wrapper that calls `build_link()` from `builder.py`.
+**Step 3 — Show the output directly.** No commentary, no questions, no suggestions.
 
-## Key facts
+---
 
+## Key facts about builder.py
+
+- **Entry point:** `tracking_link_builder/builder.py` — all logic lives here. `main.py` is a thin wrapper.
 - **MMP detection** — inferred from URL host (AppsFlyer, Adjust, Singular, Kochava, Branch)
 - **Unified detection** — presence of `id2` param in the URL
 - **id2 values** — `dV9XX0xY` (ODS, `[...]` placeholder style) / `ckFCRVBW` (DSP, `{...}` placeholder style)
