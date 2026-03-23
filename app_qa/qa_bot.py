@@ -236,6 +236,7 @@ def run_legal(apk_path: str) -> dict:
                 "plausibility": ds.plausibility,
                 "suspect_permissions": ds.suspect_permissions,
             } if ds else None,
+            "in_app_legal": r.in_app_legal,
         }
     except Exception as exc:
         return {"error": str(exc)}

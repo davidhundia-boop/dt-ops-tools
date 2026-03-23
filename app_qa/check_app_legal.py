@@ -24,11 +24,21 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+import struct
+import zipfile
+
 try:
     from playwright.sync_api import sync_playwright
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
+
+try:
+    from androguard.core.apk import APK as AndroguardAPK
+    from androguard.core.axml import AXMLPrinter
+    HAS_ANDROGUARD = True
+except ImportError:
+    HAS_ANDROGUARD = False
 
 try:
     from google_play_scraper import app as gp_app
@@ -132,6 +142,7 @@ class LegalCheckResult:
     tc_links: list[LegalLink] = field(default_factory=list)
     pp_links_on_site: list[LegalLink] = field(default_factory=list)
     other_legal_links: list[LegalLink] = field(default_factory=list)
+    in_app_legal: Optional[dict] = None
     privacy_policy_verdict: str = "NOT FOUND"
     tc_verdict: str = "NOT FOUND"
     confidence: str = "FAIL"
@@ -210,6 +221,295 @@ def extract_apk_permissions(apk_path: str,
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
     return None
+
+
+# ---------------------------------------------------------------------------
+# In-App Legal Link Detection (static APK analysis)
+# ---------------------------------------------------------------------------
+
+_LEGAL_URL_PATTERNS = re.compile(
+    r"https?://[^\s\"'<>]+(?:privac|policy|terms|tos(?:/|$)|eula|legal|"
+    r"terms.of.service|terms.of.use|terms.and.conditions|"
+    r"datenschutz|impressum|gdpr|ccpa)",
+    re.IGNORECASE,
+)
+
+_PP_URL_KEYWORDS = ("privac", "policy", "datenschutz", "gdpr", "ccpa")
+_TC_URL_KEYWORDS = (
+    "terms", "tos", "eula", "legal",
+    "terms-of-service", "terms-of-use", "terms-and-conditions",
+    "user-agreement", "end-user-license",
+)
+
+_LEGAL_RES_NAMES = re.compile(
+    r"(privac|policy|terms|eula|legal|tos_url|terms_url|pp_url|"
+    r"privacy_policy|terms_of_service|terms_of_use|user_agreement)",
+    re.IGNORECASE,
+)
+
+_LEGAL_ACTIVITY_NAMES = re.compile(
+    r"(privac|policy|terms|legal|eula|tos(?=[A-Z_/]))",
+    re.IGNORECASE,
+)
+
+
+def _extract_dex_strings(dex_bytes: bytes) -> set[str]:
+    """Extract all strings from a DEX file via binary header parsing.
+
+    Replicates the pattern from play_integrity_analyzer.py.
+    """
+    strings: set[str] = set()
+    try:
+        if len(dex_bytes) < 112 or dex_bytes[:4] != b"dex\n":
+            return strings
+        string_ids_size = struct.unpack_from("<I", dex_bytes, 56)[0]
+        string_ids_off = struct.unpack_from("<I", dex_bytes, 60)[0]
+        for i in range(string_ids_size):
+            str_data_off = struct.unpack_from(
+                "<I", dex_bytes, string_ids_off + i * 4
+            )[0]
+            if str_data_off >= len(dex_bytes):
+                continue
+            pos = str_data_off
+            size = 0
+            shift = 0
+            while pos < len(dex_bytes):
+                byte = dex_bytes[pos]
+                size |= (byte & 0x7F) << shift
+                pos += 1
+                if byte & 0x80 == 0:
+                    break
+                shift += 7
+            end = min(pos + size, len(dex_bytes))
+            try:
+                s = dex_bytes[pos:end].decode("utf-8", errors="ignore")
+                if len(s) > 3:
+                    strings.add(s)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return strings
+
+
+def _classify_legal_url(url: str) -> str:
+    """Return 'pp', 'tc', or '' based on URL keywords."""
+    low = url.lower()
+    if any(kw in low for kw in _PP_URL_KEYWORDS):
+        return "pp"
+    if any(kw in low for kw in _TC_URL_KEYWORDS):
+        return "tc"
+    return ""
+
+
+def scan_apk_legal_links(
+    apk_path: str, verbose: bool = False,
+) -> dict:
+    """Statically analyse an APK for in-app privacy policy and T&C links.
+
+    Three extraction passes:
+      1. String resources (res/values/strings.xml) via androguard or aapt2
+      2. URLs from DEX bytecode via binary header parsing
+      3. Activity names from AndroidManifest.xml
+
+    Returns dict with keys:
+      in_app_pp_urls, in_app_tc_urls, legal_activities,
+      legal_strings, verdict, notes
+    """
+    pp_urls: list[str] = []
+    tc_urls: list[str] = []
+    legal_activities: list[str] = []
+    legal_strings: list[str] = []
+    notes: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Pass 1 — String resources
+    # ------------------------------------------------------------------
+    if verbose:
+        print("  [*] In-app legal: scanning string resources ...")
+
+    if HAS_ANDROGUARD:
+        try:
+            apk_obj = AndroguardAPK(apk_path)
+            # Check all res/values string XML files
+            for fname in apk_obj.get_files():
+                if not (fname.startswith("res/") and fname.endswith(".xml")
+                        and "values" in fname):
+                    continue
+                try:
+                    raw = apk_obj.get_file(fname)
+                    xml_text = AXMLPrinter(raw).get_xml()
+                    if isinstance(xml_text, bytes):
+                        xml_text = xml_text.decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+
+                # Find string entries with legal-sounding names or values
+                for m in re.finditer(
+                    r'<string\s+name="([^"]*)"[^>]*>([^<]*)</string>',
+                    xml_text,
+                ):
+                    name, value = m.group(1), m.group(2)
+                    if _LEGAL_RES_NAMES.search(name):
+                        legal_strings.append(name)
+                        # If the value is a URL, classify it
+                        if value.startswith("http"):
+                            cls = _classify_legal_url(value)
+                            if cls == "pp":
+                                pp_urls.append(value)
+                            elif cls == "tc":
+                                tc_urls.append(value)
+                            else:
+                                pp_urls.append(value)  # legal-named resource → assume PP
+                        if verbose:
+                            print(f"    [+] String resource: {name}={value[:80]}")
+                    elif value.startswith("http") and _LEGAL_URL_PATTERNS.search(value):
+                        cls = _classify_legal_url(value)
+                        if cls == "pp":
+                            pp_urls.append(value)
+                        elif cls == "tc":
+                            tc_urls.append(value)
+                        legal_strings.append(name)
+                        if verbose:
+                            print(f"    [+] URL in resource: {name}={value[:80]}")
+        except Exception as exc:
+            notes.append(f"String resource scan failed: {exc}")
+    else:
+        # Fallback: aapt2 dump resources
+        try:
+            for tool in ("aapt2", "aapt"):
+                try:
+                    proc = subprocess.run(
+                        [tool, "dump", "resources", apk_path],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if proc.returncode == 0:
+                        for line in proc.stdout.splitlines():
+                            if _LEGAL_RES_NAMES.search(line):
+                                legal_strings.append(line.strip()[:120])
+                                # Try to extract URL from the line
+                                url_m = re.search(r"https?://[^\s\"']+", line)
+                                if url_m:
+                                    url = url_m.group(0)
+                                    cls = _classify_legal_url(url)
+                                    if cls == "pp":
+                                        pp_urls.append(url)
+                                    elif cls == "tc":
+                                        tc_urls.append(url)
+                        break
+                except FileNotFoundError:
+                    continue
+        except Exception as exc:
+            notes.append(f"aapt resource scan failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # Pass 2 — DEX string extraction (URLs from bytecode)
+    # ------------------------------------------------------------------
+    if verbose:
+        print("  [*] In-app legal: scanning DEX strings for URLs ...")
+
+    try:
+        with zipfile.ZipFile(apk_path, "r") as zf:
+            dex_files = [
+                n for n in zf.namelist()
+                if re.match(r"^classes\d*\.dex$", n)
+            ]
+            for dex_name in dex_files:
+                dex_bytes = zf.read(dex_name)
+                all_strings = _extract_dex_strings(dex_bytes)
+
+                for s in all_strings:
+                    if _LEGAL_URL_PATTERNS.search(s):
+                        # Extract clean URL (may have trailing junk)
+                        url_m = re.search(r"https?://[^\s\"'<>\\]+", s)
+                        if url_m:
+                            url = url_m.group(0).rstrip(".,;:)")
+                            cls = _classify_legal_url(url)
+                            if cls == "pp" and url not in pp_urls:
+                                pp_urls.append(url)
+                                if verbose:
+                                    print(f"    [+] PP URL in DEX: {url[:100]}")
+                            elif cls == "tc" and url not in tc_urls:
+                                tc_urls.append(url)
+                                if verbose:
+                                    print(f"    [+] T&C URL in DEX: {url[:100]}")
+    except Exception as exc:
+        notes.append(f"DEX string scan failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # Pass 3 — Activity names from AndroidManifest.xml
+    # ------------------------------------------------------------------
+    if verbose:
+        print("  [*] In-app legal: scanning manifest for legal activities ...")
+
+    if HAS_ANDROGUARD:
+        try:
+            if not locals().get("apk_obj"):
+                apk_obj = AndroguardAPK(apk_path)
+            activities = apk_obj.get_activities()
+            for act in activities:
+                if _LEGAL_ACTIVITY_NAMES.search(act):
+                    legal_activities.append(act)
+                    if verbose:
+                        print(f"    [+] Legal activity: {act}")
+        except Exception as exc:
+            notes.append(f"Manifest activity scan failed: {exc}")
+    else:
+        # Fallback: parse aapt2 dump badging output for activities
+        try:
+            for tool in ("aapt2", "aapt"):
+                try:
+                    proc = subprocess.run(
+                        [tool, "dump", "badging", apk_path],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if proc.returncode == 0:
+                        for m in re.finditer(
+                            r"name='([^']+Activity[^']*)'", proc.stdout,
+                        ):
+                            act = m.group(1)
+                            if _LEGAL_ACTIVITY_NAMES.search(act):
+                                legal_activities.append(act)
+                                if verbose:
+                                    print(f"    [+] Legal activity: {act}")
+                        break
+                except FileNotFoundError:
+                    continue
+        except Exception as exc:
+            notes.append(f"Manifest activity scan (aapt) failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # Verdict
+    # ------------------------------------------------------------------
+    has_pp = bool(pp_urls)
+    has_tc = bool(tc_urls)
+    has_activities = bool(legal_activities)
+
+    if has_pp or has_tc:
+        verdict = "FOUND"
+    elif has_activities:
+        verdict = "FOUND"
+        notes.append(
+            "Legal activities detected but no explicit URLs found "
+            "— links may be loaded dynamically at runtime"
+        )
+    elif legal_strings:
+        verdict = "POSSIBLY DYNAMIC"
+        notes.append(
+            "Legal-related string resource keys found but no URLs "
+            "— app may load legal content from a remote server"
+        )
+    else:
+        verdict = "NOT FOUND"
+
+    return {
+        "in_app_pp_urls": pp_urls,
+        "in_app_tc_urls": tc_urls,
+        "legal_activities": legal_activities,
+        "legal_strings": legal_strings,
+        "verdict": verdict,
+        "notes": notes,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +1010,12 @@ def verify_links(session: requests.Session, links: list[LegalLink],
 # ---------------------------------------------------------------------------
 
 def _set_verdicts(result: LegalCheckResult):
+    # In-app legal findings
+    iap = result.in_app_legal or {}
+    iap_pp = bool(iap.get("in_app_pp_urls"))
+    iap_tc = bool(iap.get("in_app_tc_urls"))
+    iap_activities = bool(iap.get("legal_activities"))
+
     # Privacy Policy
     if result.privacy_policy_url:
         result.privacy_policy_verdict = "FOUND (Play Store)"
@@ -719,6 +1025,9 @@ def _set_verdicts(result: LegalCheckResult):
             f"FOUND (Developer Website - {best.location})"
         )
         result.privacy_policy_url = best.url
+    elif iap_pp:
+        result.privacy_policy_verdict = "FOUND (In-App)"
+        result.privacy_policy_url = iap["in_app_pp_urls"][0]
     else:
         result.privacy_policy_verdict = "NOT FOUND"
 
@@ -728,12 +1037,14 @@ def _set_verdicts(result: LegalCheckResult):
         result.tc_verdict = (
             f"FOUND (Developer Website - {best.location})"
         )
+    elif iap_tc:
+        result.tc_verdict = "FOUND (In-App)"
     else:
         result.tc_verdict = "NOT FOUND"
 
     # Rating
     pp_found = result.privacy_policy_verdict.startswith("FOUND")
-    tc_found = bool(result.tc_links)
+    tc_found = result.tc_verdict.startswith("FOUND")
     ds = result.data_safety
     ds_checked = ds is not None
     ds_ok = ds_checked and ds.status in ("COMPLETE", "NO_DATA")
@@ -749,6 +1060,9 @@ def _set_verdicts(result: LegalCheckResult):
         if pp_found and tc_found:
             result.confidence = "PASS"
         elif pp_found or tc_found:
+            result.confidence = "WARNING"
+        elif iap_activities:
+            # Legal activity exists but no explicit URLs — still a signal
             result.confidence = "WARNING"
         else:
             result.confidence = "FAIL"
@@ -815,6 +1129,21 @@ def check_app(package_name: str, session: requests.Session, *,
                     result.data_safety.plausibility = "YES"
             else:
                 result.data_safety.plausibility = "YES"
+
+    # Layer 1c — In-app legal link detection (static APK analysis)
+    if result.apk_source and os.path.isfile(result.apk_source):
+        if verbose:
+            print("  [*] Running in-app legal link scan ...")
+        result.in_app_legal = scan_apk_legal_links(
+            result.apk_source, verbose=verbose,
+        )
+        if result.in_app_legal["verdict"] == "NOT FOUND":
+            result.notes.append(
+                "No privacy policy or T&C links detected inside the APK "
+                "— legal content may only be accessible via the Play Store listing"
+            )
+        for note in result.in_app_legal.get("notes", []):
+            result.notes.append(f"In-app scan: {note}")
 
     # Layer 2 — Developer website crawl
     if result.developer_website:
@@ -1000,6 +1329,29 @@ def print_result(result: LegalCheckResult):
         ds_icon, ds_detail = ("\u2014", "Skipped")
     rows.append(("Data Safety", ds_icon, ds_detail))
 
+    iap = result.in_app_legal
+    if iap is not None:
+        v = iap.get("verdict", "NOT FOUND")
+        if v == "FOUND":
+            iap_icon = "\u2705"
+            parts = []
+            if iap.get("in_app_pp_urls"):
+                parts.append("PP")
+            if iap.get("in_app_tc_urls"):
+                parts.append("T&C")
+            if iap.get("legal_activities") and not parts:
+                parts.append("Activity detected")
+            iap_detail = f"Found ({', '.join(parts)})" if parts else "Found"
+        elif v == "POSSIBLY DYNAMIC":
+            iap_icon = "\u26a0\ufe0f"
+            iap_detail = "Possibly dynamic"
+        else:
+            iap_icon = "\u274c"
+            iap_detail = "Not detected"
+    else:
+        iap_icon, iap_detail = ("\u2014", "Skipped (no APK)")
+    rows.append(("In-App Legal", iap_icon, iap_detail))
+
     # Column content-widths (padding spaces added by _row)
     W1, W2 = 13, 6
     W3 = max(20, max(len(d) for _, _, d in rows))
@@ -1025,11 +1377,26 @@ def print_result(result: LegalCheckResult):
         urls.append(("PP ", result.privacy_policy_url))
     for link in result.tc_links:
         urls.append(("T&C", link.url))
+    # In-app URLs
+    iap = result.in_app_legal or {}
+    for u in iap.get("in_app_pp_urls", []):
+        if not any(u == existing for _, existing in urls):
+            urls.append(("PP (in-app)", u))
+    for u in iap.get("in_app_tc_urls", []):
+        if not any(u == existing for _, existing in urls):
+            urls.append(("T&C (in-app)", u))
     if urls:
         print()
         print("  URLs:")
         for label, url in urls:
             print(f"    {label} \u2192 {url}")
+
+    # In-app legal activities
+    if iap.get("legal_activities"):
+        print()
+        print("  In-App Legal Activities:")
+        for act in iap["legal_activities"]:
+            print(f"    \u2192 {act}")
 
     # ── Developer info (one line) ─────────────────────────────────────────
     dev_parts: list[str] = []

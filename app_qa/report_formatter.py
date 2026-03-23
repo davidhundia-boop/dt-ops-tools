@@ -310,6 +310,39 @@ def _legal_details(legal: dict) -> list[dict]:
                 f"but requests sensitive permissions: {perms}"
             ))
 
+    # In-App Legal
+    iap = legal.get("in_app_legal")
+    if iap and not iap.get("error"):
+        verdict = iap.get("verdict", "NOT FOUND")
+        if verdict == "FOUND":
+            icon = ":white_check_mark:"
+        elif verdict == "POSSIBLY DYNAMIC":
+            icon = ":large_yellow_circle:"
+        else:
+            icon = ":x:"
+
+        iap_line = f"{icon} *In-App Legal:* {verdict}"
+
+        pp_urls = iap.get("in_app_pp_urls", [])
+        tc_urls = iap.get("in_app_tc_urls", [])
+        activities = iap.get("legal_activities", [])
+
+        if pp_urls:
+            iap_line += f"\n>*PP:* <{pp_urls[0]}|{_trunc(pp_urls[0], 80)}>"
+            if len(pp_urls) > 1:
+                iap_line += f" _+{len(pp_urls) - 1} more_"
+        if tc_urls:
+            iap_line += f"\n>*T&C:* <{tc_urls[0]}|{_trunc(tc_urls[0], 80)}>"
+            if len(tc_urls) > 1:
+                iap_line += f" _+{len(tc_urls) - 1} more_"
+        if activities:
+            acts = ", ".join(f"`{_trunc(a, 60)}`" for a in activities[:3])
+            iap_line += f"\n>*Activities:* {acts}"
+            if len(activities) > 3:
+                iap_line += f" _+{len(activities) - 3} more_"
+
+        blocks.append(_section(iap_line))
+
     # Developer contact info
     dev_website = legal.get("developer_website")
     dev_email = legal.get("developer_email")
