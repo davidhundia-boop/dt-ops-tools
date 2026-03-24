@@ -9,6 +9,7 @@ NOTE: "Optimization Suggestions" refers to activating this optimizer.py module o
 """
 
 from io import BytesIO
+import re
 import pandas as pd
 import numpy as np
 import openpyxl
@@ -23,16 +24,38 @@ def _norm_col(s):
     return str(s).strip()
 
 
+def _cand_to_words(cand):
+    """Convert camelCase or snake_case candidate to lowercase space-separated words.
+    e.g. 'campaignName' -> 'campaign name', 'site_id' -> 'site id'
+    """
+    s = cand.replace("_", " ")
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    return s.lower().strip()
+
+
 def _find_col(df, *candidates):
-    """Return first column name in df that matches any candidate (case-insensitive)."""
+    """Return first column name in df that matches any candidate (case-insensitive).
+
+    Matching order:
+    1. Exact match (after strip + lower).
+    2. Ends-with match: column name ends with the candidate expressed as words,
+       e.g. a column called 'Domino Dreams Marketing Campaigns Daily Metrics Campaign Name'
+       will match the candidate 'campaignName' because it ends with 'campaign name'.
+    """
     cols = {_norm_col(c).lower(): c for c in df.columns}
     for cand in candidates:
         k = _norm_col(cand).lower()
+        # 1. Exact match
         if k in cols:
             return cols[k]
-        # also try exact match after strip
         for c in df.columns:
             if _norm_col(c).lower() == k:
+                return c
+    # 2. Ends-with fallback (handles long descriptive column headers)
+    for cand in candidates:
+        suffix = _cand_to_words(cand)
+        for c in df.columns:
+            if _norm_col(c).lower().endswith(suffix):
                 return c
     return None
 
