@@ -10,10 +10,10 @@ from in_app_legal_verifier import (
     install_apk,
     is_game_canvas,
     launch_app,
-    NavigationResult,
     parse_ui_elements,
     uninstall_app,
     UiElement,
+    verify_legal_content,
 )
 
 SAMPLE_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
@@ -144,6 +144,49 @@ class TestFindLegalScreensFromElements:
         assert result.pp_element is None
         assert result.entry_point is not None
         assert result.entry_point.text == "Settings"
+
+
+WEBVIEW_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.webkit.WebView"
+        package="com.example" content-desc="Privacy Policy" clickable="false"
+        bounds="[0,0][1080,1920]" />
+</hierarchy>'''
+
+TEXT_LEGAL_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="Privacy Policy" resource-id="" class="android.widget.TextView"
+        package="com.example" content-desc="" clickable="false"
+        bounds="[50,100][500,140]" />
+  <node index="1" text="We collect personal information to provide our services.
+Third parties may access your data. You agree to our data processing terms."
+        resource-id="" class="android.widget.TextView"
+        package="com.example" content-desc="" clickable="false"
+        bounds="[50,160][1000,800]" />
+</hierarchy>'''
+
+NO_LEGAL_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="General Settings" resource-id="" class="android.widget.TextView"
+        package="com.example" content-desc="" clickable="false"
+        bounds="[50,100][500,140]" />
+</hierarchy>'''
+
+
+class TestVerifyLegalContent:
+    def test_webview_detected(self):
+        result = verify_legal_content(WEBVIEW_HIERARCHY, "pp")
+        assert result["verified"] is True
+        assert result["method"] == "webview"
+
+    def test_text_content_detected(self):
+        result = verify_legal_content(TEXT_LEGAL_HIERARCHY, "pp")
+        assert result["verified"] is True
+        assert result["method"] == "text_content"
+
+    def test_no_legal_content(self):
+        result = verify_legal_content(NO_LEGAL_HIERARCHY, "pp")
+        assert result["verified"] is False
 
 
 class TestCheckDeviceConnected:

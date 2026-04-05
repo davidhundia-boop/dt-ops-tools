@@ -458,3 +458,55 @@ def navigate_to_legal(max_depth: int = 3, timeout: int = 45) -> dict:
         "tc_element": tc_element,
         "blocker": None,
     }
+
+
+PP_TITLE_MARKERS = [
+    "privacy policy", "privacy notice", "data privacy",
+]
+TC_TITLE_MARKERS = [
+    "terms of service", "terms and conditions", "terms of use",
+    "end user license agreement", "legal notice", "terms & conditions",
+]
+LEGAL_PHRASE_MARKERS = [
+    "we collect", "personal information", "personal data",
+    "third parties", "data processing", "your rights",
+    "cookies", "you agree to", "by using", "we may share",
+    "data controller", "opt out",
+]
+
+
+def verify_legal_content(xml_str: str, check_type: str = "pp") -> dict:
+    """Verify that the current screen shows real legal content.
+
+    Args:
+        xml_str: UI hierarchy XML dump
+        check_type: "pp" for privacy policy, "tc" for terms & conditions
+
+    Returns:
+        {"verified": bool, "method": str|None, "url": str|None}
+    """
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return {"verified": False, "method": None, "url": None}
+
+    for node in root.iter("node"):
+        if "WebView" in node.get("class", ""):
+            url = node.get("content-desc", "") or node.get("text", "")
+            return {"verified": True, "method": "webview", "url": url or None}
+
+    all_text = ""
+    for node in root.iter("node"):
+        text = node.get("text", "")
+        if text:
+            all_text += " " + text
+    all_text_lower = all_text.lower()
+
+    title_markers = PP_TITLE_MARKERS if check_type == "pp" else TC_TITLE_MARKERS
+    has_title = any(marker in all_text_lower for marker in title_markers)
+    phrase_hits = sum(1 for marker in LEGAL_PHRASE_MARKERS if marker in all_text_lower)
+
+    if has_title and phrase_hits >= 2:
+        return {"verified": True, "method": "text_content", "url": None}
+
+    return {"verified": False, "method": None, "url": None}
