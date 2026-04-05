@@ -510,3 +510,198 @@ def verify_legal_content(xml_str: str, check_type: str = "pp") -> dict:
         return {"verified": True, "method": "text_content", "url": None}
 
     return {"verified": False, "method": None, "url": None}
+
+
+def verify_in_app_legal(
+    apk_path: str,
+    package: str,
+    screenshot_dir: str | None = None,
+) -> dict:
+    """Full pipeline: install → launch → dismiss → navigate → verify → cleanup.
+
+    Returns the result schema defined in the design spec.
+    """
+    if not check_device_connected():
+        return {
+            "error": "No Android device/emulator connected. Run 'adb devices' to check.",
+            "privacy_policy": _fail_result("No device"),
+            "terms_and_conditions": _fail_result("No device"),
+            "navigation_info": _empty_nav_info(),
+        }
+
+    if screenshot_dir:
+        os.makedirs(screenshot_dir, exist_ok=True)
+
+    if not install_apk(apk_path):
+        return {
+            "error": f"Failed to install {apk_path}",
+            "privacy_policy": _fail_result("Install failed"),
+            "terms_and_conditions": _fail_result("Install failed"),
+            "navigation_info": _empty_nav_info(),
+        }
+
+    nav_info = {
+        "onboarding_dismissed": False,
+        "login_wall": False,
+        "game_tutorial_blocked": False,
+        "screens_visited": 0,
+        "navigation_time_seconds": 0.0,
+    }
+
+    start_time = time.time()
+
+    try:
+        launch_app(package)
+
+        dismiss_result = run_dismiss_loop(max_seconds=30)
+        nav_info["onboarding_dismissed"] = dismiss_result == "ok"
+
+        if dismiss_result == "login_wall":
+            nav_info["login_wall"] = True
+            pp_ss = _take_ss(screenshot_dir, package, "login_wall")
+            return {
+                "privacy_policy": _inconclusive_result("LOGIN_WALL", pp_ss),
+                "terms_and_conditions": _inconclusive_result("LOGIN_WALL", pp_ss),
+                "navigation_info": nav_info,
+            }
+
+        xml = dump_ui_hierarchy()
+        if is_game_canvas(xml):
+            bypass_result = run_game_tutorial_bypass()
+            if bypass_result == "game_tutorial_blocked":
+                nav_info["game_tutorial_blocked"] = True
+                ss = _take_ss(screenshot_dir, package, "tutorial_blocked")
+                return {
+                    "privacy_policy": _inconclusive_result("TUTORIAL_BLOCKED", ss),
+                    "terms_and_conditions": _inconclusive_result("TUTORIAL_BLOCKED", ss),
+                    "navigation_info": nav_info,
+                }
+
+        nav = navigate_to_legal(max_depth=3, timeout=45)
+        nav_info["screens_visited"] = len(nav.get("pp_path", [])) + len(nav.get("tc_path", []))
+
+        pp_result = _build_check_result(nav, "pp", package, screenshot_dir)
+        tc_result = _build_check_result(nav, "tc", package, screenshot_dir)
+
+        nav_info["navigation_time_seconds"] = round(time.time() - start_time, 1)
+
+        return {
+            "privacy_policy": pp_result,
+            "terms_and_conditions": tc_result,
+            "navigation_info": nav_info,
+        }
+
+    finally:
+        uninstall_app(package)
+
+
+def _build_check_result(
+    nav: dict, check_type: str, package: str, screenshot_dir: str | None
+) -> dict:
+    key_found = "pp_found" if check_type == "pp" else "tc_found"
+    key_path = "pp_path" if check_type == "pp" else "tc_path"
+    key_element = "pp_element" if check_type == "pp" else "tc_element"
+
+    if not nav[key_found]:
+        return {
+            "ui_found": False,
+            "ui_path": [],
+            "ui_method": None,
+            "ui_url": None,
+            "screenshot": None,
+            "notes": [],
+        }
+
+    element = nav[key_element]
+    if element:
+        tap(element.center_x, element.center_y)
+        time.sleep(2)
+
+    xml = dump_ui_hierarchy()
+    verification = verify_legal_content(xml, check_type)
+
+    ss_path = _take_ss(screenshot_dir, package, check_type)
+
+    result = {
+        "ui_found": verification["verified"],
+        "ui_path": nav[key_path],
+        "ui_method": verification["method"],
+        "ui_url": verification.get("url"),
+        "screenshot": ss_path,
+        "notes": [] if verification["verified"] else [
+            f"Found a '{nav[key_path][-1] if nav[key_path] else '?'}' element "
+            "but could not confirm legal content on the destination screen.",
+        ],
+    }
+
+    press_back()
+    time.sleep(0.5)
+
+    return result
+
+
+def _take_ss(screenshot_dir: str | None, package: str, label: str) -> str | None:
+    if not screenshot_dir:
+        return None
+    path = os.path.join(screenshot_dir, f"{package}_{label}.png")
+    if take_screenshot(path):
+        return path
+    return None
+
+
+def _fail_result(note: str) -> dict:
+    return {
+        "ui_found": False, "ui_path": [], "ui_method": None,
+        "ui_url": None, "screenshot": None, "notes": [note],
+    }
+
+
+def _inconclusive_result(confidence: str, screenshot: str | None) -> dict:
+    return {
+        "ui_found": False, "ui_path": [], "ui_method": None,
+        "ui_url": None, "screenshot": screenshot,
+        "notes": [f"Navigation blocked: {confidence}"],
+    }
+
+
+def _empty_nav_info() -> dict:
+    return {
+        "onboarding_dismissed": False, "login_wall": False,
+        "game_tutorial_blocked": False, "screens_visited": 0,
+        "navigation_time_seconds": 0.0,
+    }
+
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser(description="Verify in-app legal content accessibility")
+    p.add_argument("apk", help="Path to APK file")
+    p.add_argument("--package", "-p", required=True, help="Package name (e.g. com.example.app)")
+    p.add_argument("--screenshots", "-s", default=None, help="Directory to save screenshots")
+    p.add_argument("--json", action="store_true", help="Output JSON")
+    args = p.parse_args()
+
+    result = verify_in_app_legal(args.apk, args.package, args.screenshots)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        for check in ("privacy_policy", "terms_and_conditions"):
+            r = result[check]
+            label = "Privacy Policy" if check == "privacy_policy" else "Terms & Conditions"
+            found = r["ui_found"]
+            icon = "FOUND" if found else "NOT FOUND"
+            path = " > ".join(r["ui_path"]) if r["ui_path"] else "N/A"
+            print(f"  {label}: {icon}  (path: {path})")
+            for note in r.get("notes", []):
+                print(f"    Note: {note}")
+
+        nav = result.get("navigation_info", {})
+        if nav.get("login_wall"):
+            print("  BLOCKED: Login wall detected")
+        if nav.get("game_tutorial_blocked"):
+            print("  BLOCKED: Game tutorial could not be bypassed")
+
+
+if __name__ == "__main__":
+    main()
