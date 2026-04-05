@@ -48,21 +48,47 @@ def install_apk(apk_path: str) -> bool:
     return result.returncode == 0 and "Success" in result.stdout
 
 
-def launch_app(package: str) -> None:
+def launch_app(package: str, wait_timeout: int = 15) -> bool:
+    """Launch app and wait until it's in the foreground.
+
+    Tries monkey first, falls back to am start if the app doesn't foreground.
+    Returns True if the app reached the foreground within wait_timeout seconds.
+    """
     _adb([
         "shell", "monkey", "-p", package,
         "-c", "android.intent.category.LAUNCHER", "1",
     ])
-    time.sleep(3)
+    deadline = time.time() + wait_timeout
+    while time.time() < deadline:
+        time.sleep(2)
+        fg = get_foreground_package()
+        if fg and fg == package:
+            time.sleep(1)
+            return True
+        if time.time() - (deadline - wait_timeout) > 6:
+            _adb(["shell", "am", "start", "-n", f"{package}/.App"])
+            time.sleep(3)
+            _adb([
+                "shell", "am", "start",
+                "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.LAUNCHER",
+                "--activity-single-top", package,
+            ])
+            time.sleep(3)
+            fg = get_foreground_package()
+            if fg and fg == package:
+                return True
+    return False
 
 
 def get_foreground_package() -> str | None:
     result = _adb(["shell", "dumpsys", "activity", "activities"])
-    for line in result.stdout.splitlines():
-        if "mResumedActivity" in line:
-            match = re.search(r"u0 ([a-zA-Z0-9_.]+)/", line)
-            if match:
-                return match.group(1)
+    for pattern in ("mResumedActivity", "topResumedActivity", "ResumedActivity"):
+        for line in result.stdout.splitlines():
+            if pattern in line:
+                match = re.search(r"u0 ([a-zA-Z0-9_.]+)/", line)
+                if match:
+                    return match.group(1)
     return None
 
 
@@ -95,7 +121,9 @@ def swipe_left() -> None:
 def dump_ui_hierarchy() -> str:
     _adb(["shell", "uiautomator", "dump", HIERARCHY_PATH])
     result = _adb(["shell", "cat", HIERARCHY_PATH])
-    return result.stdout
+    xml = result.stdout
+    xml = re.sub(r"<\?xml[^?]*\?>", "", xml).strip()
+    return xml
 
 
 def hierarchy_hash(xml: str) -> str:
@@ -551,7 +579,13 @@ def verify_in_app_legal(
     start_time = time.time()
 
     try:
-        launch_app(package)
+        if not launch_app(package):
+            return {
+                "error": f"App {package} did not reach foreground after launch",
+                "privacy_policy": _fail_result("Launch failed"),
+                "terms_and_conditions": _fail_result("Launch failed"),
+                "navigation_info": nav_info,
+            }
 
         dismiss_result = run_dismiss_loop(max_seconds=30)
         nav_info["onboarding_dismissed"] = dismiss_result == "ok"
@@ -564,6 +598,14 @@ def verify_in_app_legal(
                 "terms_and_conditions": _inconclusive_result("LOGIN_WALL", pp_ss),
                 "navigation_info": nav_info,
             }
+
+        fg = get_foreground_package()
+        if fg and fg != package:
+            _adb([
+                "shell", "monkey", "-p", package,
+                "-c", "android.intent.category.LAUNCHER", "1",
+            ])
+            time.sleep(3)
 
         xml = dump_ui_hierarchy()
         if is_game_canvas(xml):

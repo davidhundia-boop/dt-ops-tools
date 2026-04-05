@@ -223,11 +223,15 @@ class TestInstallApk:
 class TestLaunchApp:
     @patch("in_app_legal_verifier.subprocess.run")
     def test_launch_sends_monkey_command(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="")
-        launch_app("com.example.app")
-        args = mock_run.call_args_list[-1][0][0]
-        assert "monkey" in args
-        assert "com.example.app" in args
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="u0 com.example.app/com.example.app.MainActivity\n  mResumedActivity",
+        )
+        result = launch_app("com.example.app", wait_timeout=5)
+        calls = [c[0][0] for c in mock_run.call_args_list]
+        monkey_call = [c for c in calls if "monkey" in c]
+        assert len(monkey_call) >= 1
+        assert "com.example.app" in monkey_call[0]
 
 
 class TestUninstallApp:
