@@ -363,6 +363,49 @@ def _legal_details(legal: dict) -> list[dict]:
     return blocks
 
 
+def _in_app_verification_details(verification: dict) -> list[dict]:
+    blocks = [_section("*:iphone: In-App Legal Verification — Full Details*")]
+
+    nav = verification.get("navigation_info", {})
+    if nav.get("login_wall"):
+        blocks.append(_section(":warning: *Navigation blocked by login wall.* Manual verification required."))
+    if nav.get("game_tutorial_blocked"):
+        blocks.append(_section(":warning: *Could not bypass game tutorial.* Manual verification required."))
+
+    time_s = nav.get("navigation_time_seconds", 0)
+    blocks.append(_context(f"Navigation time: `{time_s}s`   |   Onboarding dismissed: `{nav.get('onboarding_dismissed', False)}`"))
+
+    for check_key, label in [("privacy_policy", "Privacy Policy"), ("terms_and_conditions", "Terms & Conditions")]:
+        c = verification.get(check_key, {})
+        verdict = c.get("verdict", "FAIL")
+        confidence = c.get("confidence", "NOT_FOUND")
+        ui_found = c.get("ui_found", False)
+        static_found = c.get("static_found", False)
+        path = " > ".join(c.get("ui_path", [])) or "N/A"
+        method = c.get("ui_method") or "N/A"
+
+        verdict_map = {
+            "PASS": ":large_green_circle:",
+            "FAIL": ":red_circle:",
+            "INCONCLUSIVE": ":warning:",
+        }
+        icon = verdict_map.get(verdict, ":warning:")
+
+        line = (
+            f"{icon} *{label}:* {verdict} (`{confidence}`)\n"
+            f">UI path: `{path}`   |   Method: `{method}`\n"
+            f">Static found: `{static_found}`   |   UI found: `{ui_found}`"
+        )
+
+        notes = c.get("notes", [])
+        if notes:
+            line += "\n>" + "\n>".join(f":information_source: {_trunc(n, 150)}" for n in notes[:3])
+
+        blocks.append(_section(line))
+
+    return blocks
+
+
 # ── Main Builder ───────────────────────────────────────────────────────────────
 
 def _classification_line(cls: dict) -> str:
@@ -386,7 +429,7 @@ def _classification_line(cls: dict) -> str:
         return f":file_folder: *Category:* {main}   |   *Sub-category:* {sub}"
 
 
-def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str, classification: dict | None = None) -> list[dict]:
+def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str, classification: dict | None = None, verification: dict | None = None) -> list[dict]:
     """
     Build the complete Slack Block Kit payload for the QA report.
 
@@ -454,6 +497,10 @@ def build_report_blocks(wl: dict, pi: dict, legal: dict, filename: str, classifi
     blocks.extend(_play_integrity_details(pi))
     blocks.append(_divider())
     blocks.extend(_legal_details(legal))
+
+    if verification:
+        blocks.append(_divider())
+        blocks.extend(_in_app_verification_details(verification))
 
     # Slack hard limit: 50 blocks per message
     if len(blocks) > 50:
