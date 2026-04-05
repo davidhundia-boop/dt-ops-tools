@@ -1,7 +1,65 @@
 """Tests for in_app_legal_verifier ADB utilities."""
 import pytest
 from unittest.mock import patch, MagicMock
-from in_app_legal_verifier import check_device_connected, install_apk, launch_app, uninstall_app
+from in_app_legal_verifier import (
+    check_device_connected,
+    find_elements_by_keywords,
+    install_apk,
+    launch_app,
+    parse_ui_elements,
+    uninstall_app,
+    UiElement,
+)
+
+SAMPLE_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="Settings" resource-id="com.example:id/settings_btn"
+        class="android.widget.TextView" package="com.example"
+        content-desc="" clickable="true" bounds="[100,200][300,250]" />
+  <node index="1" text="Privacy Policy" resource-id="com.example:id/pp_link"
+        class="android.widget.TextView" package="com.example"
+        content-desc="" clickable="true" bounds="[100,300][400,350]" />
+  <node index="2" text="Play Game" resource-id="com.example:id/play_btn"
+        class="android.widget.Button" package="com.example"
+        content-desc="" clickable="true" bounds="[100,400][400,450]" />
+  <node index="3" text="" resource-id="com.example:id/gear"
+        class="android.widget.ImageView" package="com.example"
+        content-desc="Settings" clickable="true" bounds="[900,50][950,100]" />
+</hierarchy>'''
+
+
+class TestParseUiElements:
+    def test_extracts_clickable_elements(self):
+        elements = parse_ui_elements(SAMPLE_HIERARCHY)
+        assert len(elements) == 4
+        assert elements[0].text == "Settings"
+        assert elements[0].clickable is True
+
+    def test_extracts_bounds(self):
+        elements = parse_ui_elements(SAMPLE_HIERARCHY)
+        settings = elements[0]
+        assert settings.center_x == 200
+        assert settings.center_y == 225
+
+
+class TestFindElementsByKeywords:
+    def test_finds_priority_1_legal_link(self):
+        elements = parse_ui_elements(SAMPLE_HIERARCHY)
+        matches = find_elements_by_keywords(elements, priority=1)
+        assert len(matches) == 1
+        assert matches[0].text == "Privacy Policy"
+
+    def test_finds_priority_2_settings(self):
+        elements = parse_ui_elements(SAMPLE_HIERARCHY)
+        matches = find_elements_by_keywords(elements, priority=2)
+        assert len(matches) == 2  # "Settings" text + gear icon content-desc
+        texts = {m.text or m.content_desc for m in matches}
+        assert "Settings" in texts
+
+    def test_no_matches_for_priority_4(self):
+        elements = parse_ui_elements(SAMPLE_HIERARCHY)
+        matches = find_elements_by_keywords(elements, priority=4)
+        assert len(matches) == 0
 
 
 class TestCheckDeviceConnected:

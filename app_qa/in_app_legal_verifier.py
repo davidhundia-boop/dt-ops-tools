@@ -15,6 +15,8 @@ import os
 import re
 import subprocess
 import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -98,3 +100,88 @@ def dump_ui_hierarchy() -> str:
 
 def hierarchy_hash(xml: str) -> str:
     return hashlib.md5(xml.encode("utf-8", errors="ignore")).hexdigest()
+
+
+@dataclass
+class UiElement:
+    text: str
+    content_desc: str
+    resource_id: str
+    class_name: str
+    clickable: bool
+    bounds_raw: str
+    center_x: int = 0
+    center_y: int = 0
+
+    def __post_init__(self):
+        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", self.bounds_raw)
+        if match:
+            x1, y1, x2, y2 = (int(g) for g in match.groups())
+            self.center_x = (x1 + x2) // 2
+            self.center_y = (y1 + y2) // 2
+
+    @property
+    def searchable_text(self) -> str:
+        return f"{self.text} {self.content_desc}".strip().lower()
+
+
+PRIORITY_1_KEYWORDS = [
+    "privacy policy", "privacy", "terms of service",
+    "terms and conditions", "terms of use", "terms & conditions",
+    "legal", "eula", "end user license agreement",
+]
+PRIORITY_2_KEYWORDS = [
+    "settings", "setting", "preferences", "gear",
+]
+PRIORITY_3_KEYWORDS = [
+    "about", "info", "app info", "about us",
+]
+PRIORITY_4_KEYWORDS = [
+    "open navigation drawer", "menu", "navigation", "drawer",
+    "more options", "profile", "account", "me", "more",
+]
+
+_PRIORITY_MAP = {
+    1: PRIORITY_1_KEYWORDS,
+    2: PRIORITY_2_KEYWORDS,
+    3: PRIORITY_3_KEYWORDS,
+    4: PRIORITY_4_KEYWORDS,
+}
+
+
+def parse_ui_elements(xml_str: str) -> list[UiElement]:
+    elements: list[UiElement] = []
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return elements
+    for node in root.iter("node"):
+        clickable = node.get("clickable", "false") == "true"
+        if not clickable:
+            continue
+        elements.append(UiElement(
+            text=node.get("text", ""),
+            content_desc=node.get("content-desc", ""),
+            resource_id=node.get("resource-id", ""),
+            class_name=node.get("class", ""),
+            clickable=clickable,
+            bounds_raw=node.get("bounds", "[0,0][0,0]"),
+        ))
+    return elements
+
+
+def _keyword_in_text(search: str, kw: str) -> bool:
+    """Match keyword as a whole word/phrase (avoids e.g. 'me' in 'game')."""
+    return re.search(r"\b" + re.escape(kw) + r"\b", search) is not None
+
+
+def find_elements_by_keywords(
+    elements: list[UiElement], priority: int
+) -> list[UiElement]:
+    keywords = _PRIORITY_MAP.get(priority, [])
+    matches: list[UiElement] = []
+    for el in elements:
+        search = el.searchable_text
+        if any(_keyword_in_text(search, kw) for kw in keywords):
+            matches.append(el)
+    return matches
