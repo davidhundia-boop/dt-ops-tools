@@ -672,6 +672,36 @@ def _empty_nav_info() -> dict:
     }
 
 
+def compute_verdict(
+    static_found: bool,
+    ui_found: bool,
+    blocker: str | None,
+) -> dict:
+    """Compute verdict and confidence from static + UI results.
+
+    Args:
+        static_found: True if static analysis found legal links/activities
+        ui_found: True if UI verification confirmed accessible legal content
+        blocker: None, "LOGIN_WALL", "TUTORIAL_BLOCKED", or "UNVERIFIED"
+    """
+    if blocker in ("LOGIN_WALL", "TUTORIAL_BLOCKED"):
+        return {"verdict": "INCONCLUSIVE", "confidence": blocker}
+
+    if ui_found and static_found:
+        return {"verdict": "PASS", "confidence": "STRONG"}
+
+    if ui_found and not static_found:
+        return {"verdict": "PASS", "confidence": "CONFIRMED"}
+
+    if not ui_found and static_found and blocker != "UNVERIFIED":
+        return {"verdict": "FAIL", "confidence": "STATIC_ONLY"}
+
+    if blocker == "UNVERIFIED":
+        return {"verdict": "FAIL", "confidence": "UNVERIFIED"}
+
+    return {"verdict": "FAIL", "confidence": "NOT_FOUND"}
+
+
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Verify in-app legal content accessibility")

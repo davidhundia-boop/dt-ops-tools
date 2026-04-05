@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 from in_app_legal_verifier import (
     check_device_connected,
     classify_dismiss_action,
+    compute_verdict,
     DISMISS_PATTERNS,
     find_elements_by_keywords,
     find_legal_screens_from_elements,
@@ -237,3 +238,40 @@ class TestUninstallApp:
         args = mock_run.call_args[0][0]
         assert "uninstall" in args
         assert "com.example.app" in args
+
+
+class TestComputeVerdict:
+    def test_strong_pass(self):
+        v = compute_verdict(static_found=True, ui_found=True, blocker=None)
+        assert v["verdict"] == "PASS"
+        assert v["confidence"] == "STRONG"
+
+    def test_confirmed_pass(self):
+        v = compute_verdict(static_found=False, ui_found=True, blocker=None)
+        assert v["verdict"] == "PASS"
+        assert v["confidence"] == "CONFIRMED"
+
+    def test_static_only_fail(self):
+        v = compute_verdict(static_found=True, ui_found=False, blocker=None)
+        assert v["verdict"] == "FAIL"
+        assert v["confidence"] == "STATIC_ONLY"
+
+    def test_not_found_fail(self):
+        v = compute_verdict(static_found=False, ui_found=False, blocker=None)
+        assert v["verdict"] == "FAIL"
+        assert v["confidence"] == "NOT_FOUND"
+
+    def test_login_wall_inconclusive(self):
+        v = compute_verdict(static_found=False, ui_found=False, blocker="LOGIN_WALL")
+        assert v["verdict"] == "INCONCLUSIVE"
+        assert v["confidence"] == "LOGIN_WALL"
+
+    def test_tutorial_blocked_inconclusive(self):
+        v = compute_verdict(static_found=True, ui_found=False, blocker="TUTORIAL_BLOCKED")
+        assert v["verdict"] == "INCONCLUSIVE"
+        assert v["confidence"] == "TUTORIAL_BLOCKED"
+
+    def test_unverified_fail(self):
+        v = compute_verdict(static_found=False, ui_found=False, blocker="UNVERIFIED")
+        assert v["verdict"] == "FAIL"
+        assert v["confidence"] == "UNVERIFIED"
