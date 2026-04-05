@@ -328,3 +328,133 @@ def run_game_tutorial_bypass() -> str:
             return "ok"
 
     return "game_tutorial_blocked"
+
+
+PP_KEYWORDS = ["privacy policy", "privacy"]
+TC_KEYWORDS = [
+    "terms of service", "terms and conditions", "terms of use",
+    "terms & conditions", "terms", "eula", "end user license agreement",
+]
+LEGAL_GENERIC_KEYWORDS = ["legal"]
+
+
+@dataclass
+class NavigationResult:
+    pp_element: UiElement | None = None
+    tc_element: UiElement | None = None
+    entry_point: UiElement | None = None
+
+
+def _match_legal(el: UiElement) -> tuple[bool, bool]:
+    search = el.searchable_text
+    is_pp = any(kw in search for kw in PP_KEYWORDS)
+    is_tc = any(kw in search for kw in TC_KEYWORDS)
+    if not is_pp and not is_tc and any(kw in search for kw in LEGAL_GENERIC_KEYWORDS):
+        is_pp = True
+        is_tc = True
+    return is_pp, is_tc
+
+
+def find_legal_screens_from_elements(
+    elements: list[UiElement],
+) -> NavigationResult:
+    result = NavigationResult()
+    for el in elements:
+        is_pp, is_tc = _match_legal(el)
+        if is_pp and result.pp_element is None:
+            result.pp_element = el
+        if is_tc and result.tc_element is None:
+            result.tc_element = el
+
+    if result.pp_element or result.tc_element:
+        return result
+
+    for priority in (2, 3, 4):
+        matches = find_elements_by_keywords(elements, priority)
+        if matches:
+            result.entry_point = matches[0]
+            return result
+
+    return result
+
+
+def navigate_to_legal(max_depth: int = 3, timeout: int = 45) -> dict:
+    """Navigate the app UI to find Privacy Policy and T&C screens.
+
+    Returns dict with:
+        pp_found, tc_found, pp_path, tc_path, pp_element, tc_element, blocker
+    """
+    start = time.time()
+    pp_found = False
+    tc_found = False
+    pp_path: list[str] = []
+    tc_path: list[str] = []
+    pp_element: UiElement | None = None
+    tc_element: UiElement | None = None
+    visited_hashes: set[str] = set()
+
+    def _search_current_screen(depth: int, path: list[str]) -> None:
+        nonlocal pp_found, tc_found, pp_path, tc_path, pp_element, tc_element
+
+        if time.time() - start > timeout:
+            return
+        if depth > max_depth:
+            return
+
+        xml = dump_ui_hierarchy()
+        h = hierarchy_hash(xml)
+        if h in visited_hashes:
+            return
+        visited_hashes.add(h)
+
+        elements = parse_ui_elements(xml)
+        nav = find_legal_screens_from_elements(elements)
+
+        if nav.pp_element and not pp_found:
+            pp_element = nav.pp_element
+            pp_path = path + [nav.pp_element.text or nav.pp_element.content_desc]
+            pp_found = True
+
+        if nav.tc_element and not tc_found:
+            tc_element = nav.tc_element
+            tc_path = path + [nav.tc_element.text or nav.tc_element.content_desc]
+            tc_found = True
+
+        if pp_found and tc_found:
+            return
+
+        if nav.entry_point and depth < max_depth:
+            label = nav.entry_point.text or nav.entry_point.content_desc
+            tap(nav.entry_point.center_x, nav.entry_point.center_y)
+            _search_current_screen(depth + 1, path + [label])
+
+            if not (pp_found and tc_found):
+                press_back()
+                time.sleep(0.5)
+
+                xml2 = dump_ui_hierarchy()
+                elements2 = parse_ui_elements(xml2)
+                for priority in (2, 3, 4):
+                    candidates = find_elements_by_keywords(elements2, priority)
+                    for candidate in candidates:
+                        c_label = candidate.text or candidate.content_desc
+                        if c_label == label:
+                            continue
+                        tap(candidate.center_x, candidate.center_y)
+                        _search_current_screen(depth + 1, path + [c_label])
+                        if pp_found and tc_found:
+                            return
+                        press_back()
+                        time.sleep(0.5)
+
+    _search_current_screen(0, [])
+
+    return {
+        "pp_found": pp_found,
+        "tc_found": tc_found,
+        "pp_path": pp_path,
+        "tc_path": tc_path,
+        "pp_element": pp_element,
+        "tc_element": tc_element,
+        "blocker": None,
+    }

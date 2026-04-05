@@ -6,9 +6,11 @@ from in_app_legal_verifier import (
     classify_dismiss_action,
     DISMISS_PATTERNS,
     find_elements_by_keywords,
+    find_legal_screens_from_elements,
     install_apk,
     is_game_canvas,
     launch_app,
+    NavigationResult,
     parse_ui_elements,
     uninstall_app,
     UiElement,
@@ -116,6 +118,32 @@ class TestIsGameCanvas:
 
     def test_normal_ui_is_not_game_canvas(self):
         assert is_game_canvas(NORMAL_UI_HIERARCHY) is False
+
+
+SETTINGS_THEN_LEGAL_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="Settings" resource-id="" class="android.widget.TextView"
+        package="com.example" content-desc="" clickable="true"
+        bounds="[100,200][300,250]" />
+  <node index="1" text="Share" resource-id="" class="android.widget.TextView"
+        package="com.example" content-desc="" clickable="true"
+        bounds="[100,300][300,350]" />
+</hierarchy>'''
+
+
+class TestFindLegalScreensFromElements:
+    def test_direct_legal_link_found(self):
+        elements = parse_ui_elements(SAMPLE_HIERARCHY)
+        result = find_legal_screens_from_elements(elements)
+        assert result.pp_element is not None
+        assert result.pp_element.text == "Privacy Policy"
+
+    def test_settings_entry_found_when_no_direct(self):
+        elements = parse_ui_elements(SETTINGS_THEN_LEGAL_HIERARCHY)
+        result = find_legal_screens_from_elements(elements)
+        assert result.pp_element is None
+        assert result.entry_point is not None
+        assert result.entry_point.text == "Settings"
 
 
 class TestCheckDeviceConnected:
