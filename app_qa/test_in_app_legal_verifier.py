@@ -3,6 +3,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 from in_app_legal_verifier import (
     check_device_connected,
+    classify_dismiss_action,
+    DISMISS_PATTERNS,
     find_elements_by_keywords,
     install_apk,
     launch_app,
@@ -60,6 +62,36 @@ class TestFindElementsByKeywords:
         elements = parse_ui_elements(SAMPLE_HIERARCHY)
         matches = find_elements_by_keywords(elements, priority=4)
         assert len(matches) == 0
+
+
+class TestClassifyDismissAction:
+    def test_skip_button_detected(self):
+        el = UiElement(text="Skip", content_desc="", resource_id="",
+                       class_name="android.widget.Button", clickable=True,
+                       bounds_raw="[100,100][200,150]")
+        action = classify_dismiss_action(el)
+        assert action == "skip"
+
+    def test_accept_button_detected(self):
+        el = UiElement(text="I Agree", content_desc="", resource_id="",
+                       class_name="android.widget.Button", clickable=True,
+                       bounds_raw="[100,100][200,150]")
+        action = classify_dismiss_action(el)
+        assert action == "consent"
+
+    def test_login_wall_detected(self):
+        el = UiElement(text="Sign In", content_desc="", resource_id="",
+                       class_name="android.widget.Button", clickable=True,
+                       bounds_raw="[100,100][200,150]")
+        action = classify_dismiss_action(el)
+        assert action == "login_wall"
+
+    def test_irrelevant_element_returns_none(self):
+        el = UiElement(text="Play Game", content_desc="", resource_id="",
+                       class_name="android.widget.Button", clickable=True,
+                       bounds_raw="[100,100][200,150]")
+        action = classify_dismiss_action(el)
+        assert action is None
 
 
 class TestCheckDeviceConnected:

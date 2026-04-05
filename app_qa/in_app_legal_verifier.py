@@ -185,3 +185,68 @@ def find_elements_by_keywords(
         if any(_keyword_in_text(search, kw) for kw in keywords):
             matches.append(el)
     return matches
+
+
+DISMISS_PATTERNS: dict[str, list[str]] = {
+    "skip": ["skip", "skip intro", "skip tutorial"],
+    "advance": ["next", "continue", "get started", "let's go", "start"],
+    "permission": ["allow", "while using the app", "while using", "only this time"],
+    "consent": ["accept", "accept all", "i agree", "ok", "got it", "agree", "consent"],
+    "defer": ["not now", "later", "no thanks", "maybe later", "remind me later"],
+    "close": ["close", "dismiss"],
+}
+LOGIN_KEYWORDS = ["sign in", "log in", "create account", "register"]
+
+
+def classify_dismiss_action(el: UiElement) -> str | None:
+    search = el.searchable_text
+    if any(kw in search for kw in LOGIN_KEYWORDS):
+        return "login_wall"
+    for action, keywords in DISMISS_PATTERNS.items():
+        if any(kw in search for kw in keywords):
+            return action
+    if el.text.strip() in ("X", "x", "×") or "close" in el.content_desc.lower():
+        return "close"
+    return None
+
+
+def run_dismiss_loop(max_seconds: int = 30) -> str:
+    """Dismiss onboarding popups for up to max_seconds.
+
+    Returns:
+        "ok"             — reached a stable screen (main screen)
+        "login_wall"     — detected a login requirement with no skip option
+        "timeout"        — loop exhausted without reaching stable screen
+    """
+    start = time.time()
+    prev_hash = ""
+
+    while time.time() - start < max_seconds:
+        xml = dump_ui_hierarchy()
+        h = hierarchy_hash(xml)
+        if h == prev_hash:
+            return "ok"
+        prev_hash = h
+
+        elements = parse_ui_elements(xml)
+        login_elements = []
+        dismiss_elements = []
+
+        for el in elements:
+            action = classify_dismiss_action(el)
+            if action == "login_wall":
+                login_elements.append(el)
+            elif action is not None:
+                dismiss_elements.append(el)
+
+        if login_elements and not dismiss_elements:
+            return "login_wall"
+
+        if dismiss_elements:
+            tap(dismiss_elements[0].center_x, dismiss_elements[0].center_y)
+            time.sleep(1.5)
+            continue
+
+        return "ok"
+
+    return "timeout"
