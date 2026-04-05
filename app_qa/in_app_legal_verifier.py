@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -44,8 +45,128 @@ def check_device_connected() -> bool:
 
 
 def install_apk(apk_path: str) -> bool:
+    """Install an APK, .apks bundle, or directory of split APKs.
+
+    Supports:
+      - Regular .apk files
+      - Directories containing base.apk + split_*.apk files
+      - .apks bundles (ZIP of split APKs, from bundletool)
+      - .zip files containing APKs
+      - Auto-patches INSTALL_FAILED_MISSING_SPLIT by removing requiredSplitTypes
+    """
+    if os.path.isdir(apk_path):
+        return _install_split_dir(apk_path)
+
+    ext = os.path.splitext(apk_path)[1].lower()
+
+    if ext in (".apks", ".zip"):
+        return _install_apk_bundle(apk_path)
+
     result = _adb(["install", "-r", apk_path], timeout=120)
-    return result.returncode == 0 and "Success" in result.stdout
+    combined = result.stdout + result.stderr
+    if result.returncode == 0 and "Success" in combined:
+        return True
+
+    if "INSTALL_FAILED_MISSING_SPLIT" in combined:
+        try:
+            from patch_apk import needs_split_patch, patch_apk as do_patch
+            if needs_split_patch(apk_path):
+                patched = do_patch(apk_path)
+                r2 = _adb(["install", "-r", "-t", patched], timeout=120)
+                return r2.returncode == 0 and "Success" in (r2.stdout + r2.stderr)
+        except Exception:
+            pass
+
+    return False
+
+
+def _install_split_dir(dir_path: str) -> bool:
+    """Install split APKs from a directory using adb install-multiple.
+
+    Picks base.apk + the best ABI split for the connected device.
+    """
+    apks = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".apk")]
+    if not apks:
+        return False
+
+    device_abi = _adb(["shell", "getprop", "ro.product.cpu.abilist"]).stdout.strip()
+    preferred_abis = [a.strip().replace("-", "_") for a in device_abi.split(",")]
+
+    base = [a for a in apks if os.path.basename(a) == "base.apk"]
+    splits = [a for a in apks if os.path.basename(a) != "base.apk"]
+
+    selected = list(base)
+    for abi in preferred_abis:
+        abi_splits = [s for s in splits if abi in os.path.basename(s)]
+        if abi_splits:
+            selected.extend(abi_splits)
+            break
+
+    non_abi_splits = [s for s in splits
+                      if not any(a in os.path.basename(s) for a in ("arm", "x86", "mips"))]
+    selected.extend(non_abi_splits)
+
+    if not selected:
+        selected = apks
+
+    result = _adb(["install-multiple", "-r"] + selected, timeout=180)
+    combined = result.stdout + result.stderr
+    return result.returncode == 0 and "Success" in combined
+
+
+def _install_apk_bundle(bundle_path: str) -> bool:
+    """Install an .apks/.zip bundle by extracting to a folder and using _install_split_dir.
+
+    Follows the manual testing approach: treat .apks as a ZIP, extract all
+    APKs into a flat directory, then let _install_split_dir handle ABI selection.
+
+    Also handles the case where a .zip is actually a renamed single APK
+    (contains AndroidManifest.xml + classes.dex but no .apk files inside).
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as z:
+            names = z.namelist()
+            apk_names = [n for n in names if n.endswith(".apk")]
+
+            if not apk_names:
+                # No .apk files inside — check if the ZIP itself IS a renamed APK
+                if "AndroidManifest.xml" in names:
+                    import shutil
+                    tmp_apk = bundle_path + ".tmp.apk"
+                    try:
+                        shutil.copy2(bundle_path, tmp_apk)
+                        result = _adb(["install", "-r", tmp_apk], timeout=120)
+                        combined = result.stdout + result.stderr
+                        if result.returncode == 0 and "Success" in combined:
+                            return True
+
+                        if "INSTALL_FAILED_MISSING_SPLIT" in combined:
+                            try:
+                                from patch_apk import needs_split_patch, patch_apk as do_patch
+                                if needs_split_patch(tmp_apk):
+                                    patched = do_patch(tmp_apk)
+                                    r2 = _adb(["install", "-r", "-t", patched], timeout=120)
+                                    c2 = r2.stdout + r2.stderr
+                                    return r2.returncode == 0 and "Success" in c2
+                            except Exception:
+                                pass
+                        return False
+                    finally:
+                        if os.path.exists(tmp_apk):
+                            os.unlink(tmp_apk)
+                return False
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for name in apk_names:
+                    dst = os.path.join(tmpdir, os.path.basename(name))
+                    with open(dst, "wb") as f:
+                        f.write(z.read(name))
+
+                return _install_split_dir(tmpdir)
+    except Exception:
+        return False
 
 
 def launch_app(package: str, wait_timeout: int = 15) -> bool:
@@ -59,15 +180,23 @@ def launch_app(package: str, wait_timeout: int = 15) -> bool:
         "-c", "android.intent.category.LAUNCHER", "1",
     ])
     deadline = time.time() + wait_timeout
+    tried_am = False
     while time.time() < deadline:
         time.sleep(2)
         fg = get_foreground_package()
         if fg and fg == package:
-            time.sleep(1)
-            return True
-        if time.time() - (deadline - wait_timeout) > 6:
-            _adb(["shell", "am", "start", "-n", f"{package}/.App"])
-            time.sleep(3)
+            time.sleep(2)
+            fg2 = get_foreground_package()
+            if fg2 and fg2 == package:
+                return True
+            # App appeared but immediately crashed
+            return False
+
+        if _detect_app_crash(package):
+            return False
+
+        if not tried_am and time.time() - (deadline - wait_timeout) > 5:
+            tried_am = True
             _adb([
                 "shell", "am", "start",
                 "-a", "android.intent.action.MAIN",
@@ -77,8 +206,28 @@ def launch_app(package: str, wait_timeout: int = 15) -> bool:
             time.sleep(3)
             fg = get_foreground_package()
             if fg and fg == package:
-                return True
+                time.sleep(2)
+                fg2 = get_foreground_package()
+                if fg2 and fg2 == package:
+                    return True
+                return False
     return False
+
+
+def _detect_app_crash(package: str) -> bool:
+    """Check logcat for recent crash of the given package (last 50 lines)."""
+    result = _adb(["logcat", "-d", "-t", "50", "--pid",
+                    _get_app_pid(package) or "0"], timeout=5)
+    output = result.stdout + result.stderr
+    crash_signals = ["FATAL EXCEPTION", "Process: " + package + ", PID:",
+                     "has died", "Force finishing activity"]
+    return any(s in output for s in crash_signals)
+
+
+def _get_app_pid(package: str) -> str | None:
+    result = _adb(["shell", "pidof", package], timeout=5)
+    pid = result.stdout.strip()
+    return pid if pid.isdigit() else None
 
 
 def get_foreground_package() -> str | None:
@@ -138,6 +287,7 @@ class UiElement:
     class_name: str
     clickable: bool
     bounds_raw: str
+    package: str = ""
     center_x: int = 0
     center_y: int = 0
 
@@ -177,7 +327,7 @@ _PRIORITY_MAP = {
 }
 
 
-def parse_ui_elements(xml_str: str) -> list[UiElement]:
+def parse_ui_elements(xml_str: str, clickable_only: bool = True) -> list[UiElement]:
     elements: list[UiElement] = []
     try:
         root = ET.fromstring(xml_str)
@@ -185,7 +335,7 @@ def parse_ui_elements(xml_str: str) -> list[UiElement]:
         return elements
     for node in root.iter("node"):
         clickable = node.get("clickable", "false") == "true"
-        if not clickable:
+        if clickable_only and not clickable:
             continue
         elements.append(UiElement(
             text=node.get("text", ""),
@@ -194,6 +344,7 @@ def parse_ui_elements(xml_str: str) -> list[UiElement]:
             class_name=node.get("class", ""),
             clickable=clickable,
             bounds_raw=node.get("bounds", "[0,0][0,0]"),
+            package=node.get("package", ""),
         ))
     return elements
 
@@ -216,7 +367,7 @@ def find_elements_by_keywords(
 
 
 DISMISS_PATTERNS: dict[str, list[str]] = {
-    "skip": ["skip", "skip intro", "skip tutorial"],
+    "skip": ["skip", "skip intro", "skip tutorial", "skip for now"],
     "advance": ["next", "continue", "get started", "let's go", "start"],
     "permission": ["allow", "while using the app", "while using", "only this time"],
     "consent": ["accept", "accept all", "i agree", "ok", "got it", "agree", "consent"],
@@ -238,44 +389,170 @@ def classify_dismiss_action(el: UiElement) -> str | None:
     return None
 
 
-def run_dismiss_loop(max_seconds: int = 30) -> str:
-    """Dismiss onboarding popups for up to max_seconds.
+SYSTEM_DIALOG_PACKAGES = {"com.google.android.permissioncontroller",
+                          "com.android.permissioncontroller",
+                          "com.android.packageinstaller",
+                          "com.google.android.packageinstaller"}
+
+SYSTEM_DIALOG_ACTIONS = {"allow", "don't allow", "deny", "while using the app",
+                         "only this time", "ok", "cancel", "close"}
+
+
+def dismiss_system_dialogs() -> bool:
+    """Handle system-level dialogs (permission requests, crash dialogs, etc.).
+
+    Returns True if a dialog was dismissed.
+    """
+    xml = dump_ui_hierarchy()
+    elements = parse_ui_elements(xml)
+    if not elements:
+        return False
+
+    any_system = any(el.package in SYSTEM_DIALOG_PACKAGES for el in elements)
+    if not any_system:
+        return False
+
+    for el in elements:
+        if not el.clickable:
+            continue
+        text = el.text.lower().strip()
+        resource = el.resource_id.lower()
+        if text in SYSTEM_DIALOG_ACTIONS or "permission_allow" in resource or \
+                "permission_deny" in resource:
+            tap(el.center_x, el.center_y)
+            time.sleep(1)
+            return True
+
+    return False
+
+
+def _rank_clickable(el: UiElement) -> int:
+    """Score a clickable element for how likely it advances onboarding.
+
+    Lower score = tap first.  Pattern-matched dismiss buttons beat generic
+    clickable elements, which beat login/sign-in elements.
+    """
+    search = el.searchable_text
+    # Best: known dismiss keywords
+    for keywords in DISMISS_PATTERNS.values():
+        if any(kw in search for kw in keywords):
+            return 0
+    # Good: looks like a button (Button, ImageButton class)
+    cls = el.class_name.lower()
+    if "button" in cls:
+        return 1
+    # OK: any clickable with text
+    if el.text.strip():
+        return 2
+    # Fallback: clickable with no text (icon buttons, etc.)
+    return 3
+
+
+EXTERNAL_LOGIN_PACKAGES = {
+    "com.android.vending", "com.google.android.gms",
+    "com.google.android.gsf.login", "com.google.android.play.games",
+    "com.facebook.katana", "com.facebook.orca",
+}
+
+
+def run_dismiss_loop(max_seconds: int = 60) -> str:
+    """Aggressively push through onboarding by tapping clickable elements.
+
+    Strategy: on every screen, dismiss system dialogs first, then tap the
+    most promising clickable element (known dismiss patterns first, then
+    any button, then any clickable).  Keeps going until the screen
+    stabilises or we time out.
 
     Returns:
-        "ok"             — reached a stable screen (main screen)
-        "login_wall"     — detected a login requirement with no skip option
-        "timeout"        — loop exhausted without reaching stable screen
+        "ok"             — reached a stable screen
+        "login_wall"     — only login elements remain with zero alternatives
+        "timeout"        — exhausted all attempts
     """
     start = time.time()
     prev_hash = ""
+    stable_count = 0
+    tapped_coords: set[tuple[int, int]] = set()
+
+    time.sleep(3)
 
     while time.time() - start < max_seconds:
+        # --- System dialogs (permission prompts, etc.) ---
+        if dismiss_system_dialogs():
+            stable_count = 0
+            prev_hash = ""
+            tapped_coords.clear()
+            time.sleep(1)
+            continue
+
         xml = dump_ui_hierarchy()
         h = hierarchy_hash(xml)
         if h == prev_hash:
-            return "ok"
+            stable_count += 1
+            if stable_count >= 3:
+                return "ok"
+            time.sleep(2)
+            continue
+        else:
+            stable_count = 0
+            tapped_coords.clear()
         prev_hash = h
 
-        elements = parse_ui_elements(xml)
-        login_elements = []
-        dismiss_elements = []
+        # --- Gather all clickable + non-clickable elements ---
+        clickable = parse_ui_elements(xml, clickable_only=True)
+        all_els = parse_ui_elements(xml, clickable_only=False)
 
-        for el in elements:
-            action = classify_dismiss_action(el)
-            if action == "login_wall":
-                login_elements.append(el)
-            elif action is not None:
-                dismiss_elements.append(el)
-
-        if login_elements and not dismiss_elements:
-            return "login_wall"
-
-        if dismiss_elements:
-            tap(dismiss_elements[0].center_x, dismiss_elements[0].center_y)
-            time.sleep(1.5)
+        # --- External login screens: press back ---
+        fg = get_foreground_package()
+        if fg and fg in EXTERNAL_LOGIN_PACKAGES:
+            press_back()
+            time.sleep(2)
+            stable_count = 0
+            prev_hash = ""
             continue
 
-        return "ok"
+        # --- Rank clickable elements and tap the best one ---
+        candidates = [el for el in clickable
+                      if (el.center_x, el.center_y) not in tapped_coords
+                      and el.center_x > 0 and el.center_y > 0]
+
+        # Also pick up non-clickable elements with dismiss text
+        for el in all_els:
+            if el.clickable:
+                continue
+            action = classify_dismiss_action(el)
+            if action and action != "login_wall":
+                if (el.center_x, el.center_y) not in tapped_coords:
+                    candidates.append(el)
+
+        if not candidates:
+            # Nothing left to tap — check if it's a pure login wall
+            has_login = any(
+                any(kw in el.searchable_text for kw in LOGIN_KEYWORDS)
+                for el in all_els
+            )
+            if has_login:
+                # Last resort: try pressing back
+                press_back()
+                time.sleep(2)
+                prev_hash = ""
+                # If we keep landing on login with zero options, give up
+                stable_count += 1
+                if stable_count >= 3:
+                    return "login_wall"
+                continue
+            stable_count += 1
+            if stable_count >= 3:
+                return "ok"
+            time.sleep(2)
+            continue
+
+        # Sort: dismiss-pattern matches first, then buttons, then rest
+        candidates.sort(key=_rank_clickable)
+        best = candidates[0]
+        tapped_coords.add((best.center_x, best.center_y))
+        tap(best.center_x, best.center_y)
+        time.sleep(1.5)
+        stable_count = 0
 
     return "timeout"
 
@@ -308,11 +585,36 @@ def _get_screen_size() -> tuple[int, int]:
     return 1080, 1920
 
 
+def _count_ui_nodes(xml_str: str) -> int:
+    try:
+        root = ET.fromstring(xml_str)
+        return sum(1 for _ in root.iter("node"))
+    except ET.ParseError:
+        return 0
+
+
+def _has_native_overlay(xml_str: str) -> bool:
+    """Check if native Android elements are layered on top of a game canvas."""
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return False
+    nodes = list(root.iter("node"))
+    has_surface = any(n.get("class") in GAME_VIEW_CLASSES for n in nodes)
+    has_text = any(
+        n.get("text", "").strip() or n.get("content-desc", "").strip()
+        for n in nodes if n.get("class") not in GAME_VIEW_CLASSES
+    )
+    return has_surface and has_text
+
+
 def run_game_tutorial_bypass() -> str:
-    """Attempt to get past a game tutorial screen.
+    """Attempt to navigate past game onboarding using center/corner taps.
+
+    Falls back to blind tapping when OCR/visual detection isn't needed yet.
 
     Returns:
-        "ok"                    — UI elements appeared, tutorial bypassed
+        "ok"                    — native UI elements appeared
         "game_tutorial_blocked" — all attempts failed
     """
     w, h = _get_screen_size()
@@ -331,31 +633,222 @@ def run_game_tutorial_bypass() -> str:
 
     for _ in range(3):
         tap(cx, cy)
-        time.sleep(1.5)
+        time.sleep(2)
         xml = dump_ui_hierarchy()
-        if not is_game_canvas(xml):
+        if not is_game_canvas(xml) or _has_native_overlay(xml):
             return "ok"
-
-    for tx, ty in [(w - 100, cy), (w - 100, h - 200)]:
-        tap(tx, ty)
-        time.sleep(1.5)
-        xml = dump_ui_hierarchy()
-        if not is_game_canvas(xml):
-            return "ok"
-
-    for _ in range(4):
-        swipe_left()
-        xml = dump_ui_hierarchy()
-        if not is_game_canvas(xml):
-            return "ok"
+        dismiss_system_dialogs()
 
     for _ in range(3):
-        time.sleep(3)
+        swipe_left()
+        time.sleep(1.5)
         xml = dump_ui_hierarchy()
-        if not is_game_canvas(xml):
+        if not is_game_canvas(xml) or _has_native_overlay(xml):
             return "ok"
 
+    for _ in range(2):
+        time.sleep(3)
+        xml = dump_ui_hierarchy()
+        if not is_game_canvas(xml) or _has_native_overlay(xml):
+            return "ok"
+        dismiss_system_dialogs()
+
     return "game_tutorial_blocked"
+
+
+def _navigate_game_with_screen_analysis(
+    package: str,
+    screenshot_dir: str | None,
+    max_depth: int = 4,
+    timeout: int = 120,
+) -> dict:
+    """Navigate a game-engine app using OCR + visual element detection.
+
+    Takes screenshots, runs OCR + OpenCV contour detection to find
+    interactive elements (icons, buttons, text labels), then taps them
+    to drill into settings/support menus looking for PP and T&C.
+
+    Returns dict matching the navigate_to_legal() return schema.
+    """
+    from screen_analyzer import (
+        analyze_emulator_screen, find_settings_icon, find_navigation_targets,
+        find_by_keywords, find_close_or_dismiss, tap_element, ScreenElement,
+    )
+
+    start = time.time()
+    pp_found = False
+    tc_found = False
+    pp_path: list[str] = []
+    tc_path: list[str] = []
+    visited_screens: set[str] = set()
+
+    w, h = _get_screen_size()
+
+    def _screen_signature(elements: list) -> str:
+        labels = sorted(e.label.lower() for e in elements if hasattr(e, "label"))
+        return "|".join(labels[:10])
+
+    def _check_legal(elements: list, path: list[str]) -> bool:
+        nonlocal pp_found, tc_found, pp_path, tc_path
+        found_any = False
+
+        pp_matches = find_by_keywords(elements, "privacy policy", "privacy")
+        if pp_matches and not pp_found:
+            pp_found = True
+            pp_path = path + [pp_matches[0].label]
+            found_any = True
+
+        tc_matches = find_by_keywords(
+            elements,
+            "terms of use", "terms of service", "terms and conditions",
+            "terms & conditions", "eula",
+        )
+        if tc_matches and not tc_found:
+            tc_found = True
+            tc_path = path + [tc_matches[0].label]
+            found_any = True
+
+        return found_any
+
+    def _wait_for_load(seconds: int = 5):
+        time.sleep(seconds)
+
+    path: list[str] = []
+
+    # Step 1: Analyze the initial game screen
+    elements, _ = analyze_emulator_screen(run_ocr=True)
+    _check_legal(elements, path)
+    if pp_found and tc_found:
+        return _legal_result(pp_found, tc_found, pp_path, tc_path)
+
+    sig = _screen_signature(elements)
+    visited_screens.add(sig)
+
+    # Step 2: Find and tap the settings icon
+    settings = find_settings_icon(elements, w, h)
+    if settings:
+        tap_element(settings)
+        path.append("settings_icon")
+        _wait_for_load(3)
+        dismiss_system_dialogs()
+
+        elements, _ = analyze_emulator_screen(run_ocr=True)
+        _check_legal(elements, path)
+        if pp_found and tc_found:
+            return _legal_result(pp_found, tc_found, pp_path, tc_path)
+
+        sig = _screen_signature(elements)
+        visited_screens.add(sig)
+
+        # Step 3: Look for navigation targets (support, about, help, etc.)
+        nav_targets = find_navigation_targets(elements)
+        for target in nav_targets:
+            if time.time() - start > timeout:
+                break
+
+            tap_element(target)
+            sub_path = path + [target.label]
+            _wait_for_load(8)
+
+            sub_elements, _ = analyze_emulator_screen(run_ocr=True)
+            sub_sig = _screen_signature(sub_elements)
+
+            if sub_sig in visited_screens:
+                press_back()
+                time.sleep(1)
+                continue
+            visited_screens.add(sub_sig)
+
+            _check_legal(sub_elements, sub_path)
+            if pp_found and tc_found:
+                return _legal_result(pp_found, tc_found, pp_path, tc_path)
+
+            # If this opened a webview/page, scroll down and check again
+            _adb(["shell", "input", "swipe", "540", "1800", "540", "600", "500"])
+            time.sleep(2)
+            scroll_elements, _ = analyze_emulator_screen(run_ocr=True)
+            _check_legal(scroll_elements, sub_path)
+            if pp_found and tc_found:
+                return _legal_result(pp_found, tc_found, pp_path, tc_path)
+
+            press_back()
+            time.sleep(2)
+
+    # Step 4: If settings icon wasn't found, try direct navigation text
+    if not settings and not (pp_found and tc_found):
+        nav_targets = find_navigation_targets(elements)
+        for target in nav_targets:
+            if time.time() - start > timeout:
+                break
+            tap_element(target)
+            _wait_for_load(8)
+
+            sub_elements, _ = analyze_emulator_screen(run_ocr=True)
+            _check_legal(sub_elements, [target.label])
+            if pp_found and tc_found:
+                return _legal_result(pp_found, tc_found, pp_path, tc_path)
+            press_back()
+            time.sleep(1)
+
+    return _legal_result(pp_found, tc_found, pp_path, tc_path)
+
+
+def _check_linked_page_for_legal(nav: dict, check_type: str,
+                                 base_path: list[str]) -> None:
+    """Check the currently visible page (after tapping a legal link) for
+    the missing legal item.  Scrolls down and checks both UI hierarchy
+    and OCR to find the other legal document on the same linked page."""
+    pp_kws = ["privacy policy", "privacy notice", "privacy"]
+    tc_kws = ["terms of use", "terms of service", "terms and conditions",
+              "terms & conditions", "eula"]
+    target_kws = pp_kws if check_type == "pp" else tc_kws
+    key_found = "pp_found" if check_type == "pp" else "tc_found"
+    key_path = "pp_path" if check_type == "pp" else "tc_path"
+
+    def _scan_xml() -> bool:
+        xml = dump_ui_hierarchy()
+        all_els = parse_ui_elements(xml, clickable_only=False)
+        for el in all_els:
+            if any(kw in el.searchable_text for kw in target_kws):
+                nav[key_found] = True
+                nav[key_path] = base_path + [el.text or el.content_desc]
+                return True
+        return False
+
+    # Check the initial view
+    if _scan_xml():
+        return
+
+    # Scroll down and check again (legal links are often below the fold)
+    for _ in range(3):
+        _adb(["shell", "input", "swipe", "540", "1800", "540", "600", "500"])
+        time.sleep(2)
+        if _scan_xml():
+            return
+
+    # Also try OCR in case the page is a WebView that UI Automator can't read
+    try:
+        from screen_analyzer import analyze_emulator_screen, find_by_keywords
+        elements, _ = analyze_emulator_screen(run_ocr=True)
+        matches = find_by_keywords(elements, *target_kws)
+        if matches:
+            nav[key_found] = True
+            nav[key_path] = base_path + [matches[0].label]
+    except Exception:
+        pass
+
+
+def _legal_result(pp_found: bool, tc_found: bool,
+                  pp_path: list[str], tc_path: list[str]) -> dict:
+    return {
+        "pp_found": pp_found,
+        "tc_found": tc_found,
+        "pp_path": pp_path,
+        "tc_path": tc_path,
+        "pp_element": None,
+        "tc_element": None,
+        "blocker": None,
+    }
 
 
 PP_KEYWORDS = ["privacy policy", "privacy"]
@@ -544,10 +1037,13 @@ def verify_in_app_legal(
     apk_path: str,
     package: str,
     screenshot_dir: str | None = None,
+    gemini_api_key: str | None = None,
+    device_serial: str | None = None,
 ) -> dict:
-    """Full pipeline: install → launch → dismiss → navigate → verify → cleanup.
+    """Full pipeline: install → launch → navigate → verify → cleanup.
 
-    Returns the result schema defined in the design spec.
+    When *gemini_api_key* is provided the new VisionAgent drives navigation
+    (LLM navigator + XML sensor).  Without it the legacy heuristic path runs.
     """
     if not check_device_connected():
         return {
@@ -568,6 +1064,50 @@ def verify_in_app_legal(
             "navigation_info": _empty_nav_info(),
         }
 
+    try:
+        if not launch_app(package):
+            note = f"App {package} did not reach foreground after launch"
+            if _detect_app_crash(package) or not _get_app_pid(package):
+                note += (
+                    ". The app crashed on start — if this is a base-only App Bundle APK, "
+                    "it may be missing required split APKs (native libraries)."
+                )
+            return {
+                "error": note,
+                "privacy_policy": _fail_result("Launch failed — app crashed"),
+                "terms_and_conditions": _fail_result("Launch failed — app crashed"),
+                "navigation_info": _empty_nav_info(),
+            }
+
+        if gemini_api_key:
+            return _run_vision_path(
+                package, screenshot_dir or ".", gemini_api_key, device_serial,
+            )
+
+        return _run_legacy_path(package, screenshot_dir)
+
+    finally:
+        uninstall_app(package)
+
+
+def _run_vision_path(
+    package: str, screenshot_dir: str,
+    api_key: str, device_serial: str | None,
+) -> dict:
+    """LLM-driven navigation via VisionAgent."""
+    from vision_agent import VisionAgent
+
+    agent = VisionAgent(
+        package=package,
+        screenshot_dir=screenshot_dir,
+        api_key=api_key,
+        device_serial=device_serial,
+    )
+    return agent.run()
+
+
+def _run_legacy_path(package: str, screenshot_dir: str | None) -> dict:
+    """Original heuristic-based navigation (fallback when no API key)."""
     nav_info = {
         "onboarding_dismissed": False,
         "login_wall": False,
@@ -578,28 +1118,15 @@ def verify_in_app_legal(
 
     start_time = time.time()
 
-    try:
-        if not launch_app(package):
-            return {
-                "error": f"App {package} did not reach foreground after launch",
-                "privacy_policy": _fail_result("Launch failed"),
-                "terms_and_conditions": _fail_result("Launch failed"),
-                "navigation_info": nav_info,
-            }
+    dismiss_result = run_dismiss_loop(max_seconds=60)
+    nav_info["onboarding_dismissed"] = dismiss_result != "login_wall"
 
-        dismiss_result = run_dismiss_loop(max_seconds=30)
-        nav_info["onboarding_dismissed"] = dismiss_result == "ok"
-
-        if dismiss_result == "login_wall":
-            nav_info["login_wall"] = True
-            pp_ss = _take_ss(screenshot_dir, package, "login_wall")
-            return {
-                "privacy_policy": _inconclusive_result("LOGIN_WALL", pp_ss),
-                "terms_and_conditions": _inconclusive_result("LOGIN_WALL", pp_ss),
-                "navigation_info": nav_info,
-            }
-
+    for _ in range(3):
+        dismiss_system_dialogs()
+        time.sleep(1)
         fg = get_foreground_package()
+        if fg and fg == package:
+            break
         if fg and fg != package:
             _adb([
                 "shell", "monkey", "-p", package,
@@ -607,34 +1134,56 @@ def verify_in_app_legal(
             ])
             time.sleep(3)
 
-        xml = dump_ui_hierarchy()
-        if is_game_canvas(xml):
-            bypass_result = run_game_tutorial_bypass()
-            if bypass_result == "game_tutorial_blocked":
-                nav_info["game_tutorial_blocked"] = True
-                ss = _take_ss(screenshot_dir, package, "tutorial_blocked")
-                return {
-                    "privacy_policy": _inconclusive_result("TUTORIAL_BLOCKED", ss),
-                    "terms_and_conditions": _inconclusive_result("TUTORIAL_BLOCKED", ss),
-                    "navigation_info": nav_info,
-                }
-
-        nav = navigate_to_legal(max_depth=3, timeout=45)
-        nav_info["screens_visited"] = len(nav.get("pp_path", [])) + len(nav.get("tc_path", []))
-
-        pp_result = _build_check_result(nav, "pp", package, screenshot_dir)
-        tc_result = _build_check_result(nav, "tc", package, screenshot_dir)
-
-        nav_info["navigation_time_seconds"] = round(time.time() - start_time, 1)
-
+    if dismiss_result == "login_wall":
+        nav_info["login_wall"] = True
+        pp_ss = _take_ss(screenshot_dir, package, "login_wall")
         return {
-            "privacy_policy": pp_result,
-            "terms_and_conditions": tc_result,
+            "privacy_policy": _inconclusive_result("LOGIN_WALL", pp_ss),
+            "terms_and_conditions": _inconclusive_result("LOGIN_WALL", pp_ss),
             "navigation_info": nav_info,
         }
 
-    finally:
-        uninstall_app(package)
+    xml = dump_ui_hierarchy()
+    use_game_mode = is_game_canvas(xml)
+
+    if use_game_mode:
+        run_game_tutorial_bypass()
+        dismiss_system_dialogs()
+        time.sleep(2)
+
+        nav = _navigate_game_with_screen_analysis(
+            package, screenshot_dir, max_depth=4, timeout=120,
+        )
+    else:
+        nav = navigate_to_legal(max_depth=3, timeout=45)
+
+    nav_info["screens_visited"] = len(nav.get("pp_path", [])) + len(nav.get("tc_path", []))
+
+    if nav["pp_found"] and not nav["tc_found"] and nav.get("pp_element"):
+        el = nav["pp_element"]
+        tap(el.center_x, el.center_y)
+        time.sleep(4)
+        _check_linked_page_for_legal(nav, "tc", [el.text or el.content_desc])
+        press_back()
+        time.sleep(1)
+    elif nav["tc_found"] and not nav["pp_found"] and nav.get("tc_element"):
+        el = nav["tc_element"]
+        tap(el.center_x, el.center_y)
+        time.sleep(4)
+        _check_linked_page_for_legal(nav, "pp", [el.text or el.content_desc])
+        press_back()
+        time.sleep(1)
+
+    pp_result = _build_check_result(nav, "pp", package, screenshot_dir)
+    tc_result = _build_check_result(nav, "tc", package, screenshot_dir)
+
+    nav_info["navigation_time_seconds"] = round(time.time() - start_time, 1)
+
+    return {
+        "privacy_policy": pp_result,
+        "terms_and_conditions": tc_result,
+        "navigation_info": nav_info,
+    }
 
 
 def _build_check_result(
@@ -655,9 +1204,40 @@ def _build_check_result(
         }
 
     element = nav[key_element]
-    if element:
-        tap(element.center_x, element.center_y)
-        time.sleep(2)
+
+    # If element is None but found is True, it was detected via OCR/screen analysis
+    if element is None:
+        ss_path = _take_ss(screenshot_dir, package, check_type)
+        return {
+            "ui_found": True,
+            "ui_path": nav[key_path],
+            "ui_method": "ocr_screen_analysis",
+            "ui_url": None,
+            "screenshot": ss_path,
+            "notes": [],
+        }
+
+    # If the element text is a strong direct match (e.g. "Privacy Policy",
+    # "Terms of Use"), the presence of the labeled link is sufficient proof —
+    # no need to tap and verify the destination page.
+    strong_pp = ["privacy policy", "privacy notice", "data privacy"]
+    strong_tc = ["terms of service", "terms of use", "terms and conditions",
+                 "terms & conditions", "eula", "end user license agreement"]
+    strong_kws = strong_pp if check_type == "pp" else strong_tc
+    el_text = element.searchable_text
+    if any(kw in el_text for kw in strong_kws):
+        ss_path = _take_ss(screenshot_dir, package, check_type)
+        return {
+            "ui_found": True,
+            "ui_path": nav[key_path],
+            "ui_method": "direct_label",
+            "ui_url": None,
+            "screenshot": ss_path,
+            "notes": [],
+        }
+
+    tap(element.center_x, element.center_y)
+    time.sleep(2)
 
     xml = dump_ui_hierarchy()
     verification = verify_legal_content(xml, check_type)
@@ -698,11 +1278,12 @@ def _fail_result(note: str) -> dict:
     }
 
 
-def _inconclusive_result(confidence: str, screenshot: str | None) -> dict:
+def _inconclusive_result(confidence: str, screenshot: str | None,
+                         note: str | None = None) -> dict:
     return {
         "ui_found": False, "ui_path": [], "ui_method": None,
         "ui_url": None, "screenshot": screenshot,
-        "notes": [f"Navigation blocked: {confidence}"],
+        "notes": [note or f"Navigation blocked: {confidence}"],
     }
 
 
@@ -744,16 +1325,89 @@ def compute_verdict(
     return {"verdict": "FAIL", "confidence": "NOT_FOUND"}
 
 
+def _detect_package_name(apk_path: str) -> str | None:
+    """Extract package name from an APK file, directory of splits, or .apks bundle."""
+    target = apk_path
+
+    if os.path.isdir(apk_path):
+        base = os.path.join(apk_path, "base.apk")
+        if os.path.isfile(base):
+            target = base
+        else:
+            apks = [os.path.join(apk_path, f) for f in os.listdir(apk_path)
+                    if f.endswith(".apk")]
+            target = apks[0] if apks else None
+
+    elif os.path.splitext(apk_path)[1].lower() in (".apks", ".zip"):
+        import zipfile
+        try:
+            with zipfile.ZipFile(apk_path, "r") as z:
+                apk_names = [n for n in z.namelist() if n.endswith(".apk")]
+                base_names = [n for n in apk_names if os.path.basename(n) == "base.apk"]
+                pick = base_names[0] if base_names else (apk_names[0] if apk_names else None)
+                if pick:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".apk", delete=False)
+                    tmp.write(z.read(pick))
+                    tmp.close()
+                    target = tmp.name
+        except Exception:
+            pass
+
+    if not target or not os.path.isfile(target):
+        return None
+
+    pkg = _detect_package_from_apk(target)
+
+    if target != apk_path and target.startswith(tempfile.gettempdir()):
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+
+    return pkg
+
+
+def _detect_package_from_apk(apk_file: str) -> str | None:
+    """Extract package name from a single APK file."""
+    try:
+        r = subprocess.run(
+            ["aapt2", "dump", "badging", apk_file],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("package:"):
+                for part in line.split():
+                    if part.startswith("name="):
+                        return part.split("=")[1].strip("'\"")
+    except Exception:
+        pass
+
+    try:
+        from androguard.core.apk import APK
+        return APK(apk_file).get_package()
+    except Exception:
+        pass
+
+    return None
+
+
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Verify in-app legal content accessibility")
-    p.add_argument("apk", help="Path to APK file")
-    p.add_argument("--package", "-p", required=True, help="Package name (e.g. com.example.app)")
+    p.add_argument("apk", help="Path to APK file or directory of split APKs")
+    p.add_argument("--package", "-p", default=None,
+                   help="Package name (auto-detected from APK if omitted)")
     p.add_argument("--screenshots", "-s", default=None, help="Directory to save screenshots")
     p.add_argument("--json", action="store_true", help="Output JSON")
     args = p.parse_args()
 
-    result = verify_in_app_legal(args.apk, args.package, args.screenshots)
+    package = args.package
+    if not package:
+        package = _detect_package_name(args.apk)
+        if not package:
+            p.error("Could not auto-detect package name. Use --package to specify it.")
+
+    result = verify_in_app_legal(args.apk, package, args.screenshots)
 
     if args.json:
         print(json.dumps(result, indent=2, default=str))
