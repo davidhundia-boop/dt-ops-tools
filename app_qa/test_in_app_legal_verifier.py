@@ -7,6 +7,7 @@ from in_app_legal_verifier import (
     DISMISS_PATTERNS,
     find_elements_by_keywords,
     install_apk,
+    is_game_canvas,
     launch_app,
     parse_ui_elements,
     uninstall_app,
@@ -92,6 +93,29 @@ class TestClassifyDismissAction:
                        bounds_raw="[100,100][200,150]")
         action = classify_dismiss_action(el)
         assert action is None
+
+
+GAME_CANVAS_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.view.SurfaceView"
+        package="com.example.game" content-desc="" clickable="false"
+        bounds="[0,0][1080,1920]" />
+</hierarchy>'''
+
+NORMAL_UI_HIERARCHY = '''<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" text="Settings" resource-id="com.example:id/btn"
+        class="android.widget.Button" package="com.example"
+        content-desc="" clickable="true" bounds="[100,200][300,250]" />
+</hierarchy>'''
+
+
+class TestIsGameCanvas:
+    def test_detects_surface_view_only(self):
+        assert is_game_canvas(GAME_CANVAS_HIERARCHY) is True
+
+    def test_normal_ui_is_not_game_canvas(self):
+        assert is_game_canvas(NORMAL_UI_HIERARCHY) is False
 
 
 class TestCheckDeviceConnected:

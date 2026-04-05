@@ -250,3 +250,81 @@ def run_dismiss_loop(max_seconds: int = 30) -> str:
         return "ok"
 
     return "timeout"
+
+
+GAME_VIEW_CLASSES = {"android.view.SurfaceView", "android.opengl.GLSurfaceView"}
+
+
+def is_game_canvas(xml_str: str) -> bool:
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return False
+    all_nodes = list(root.iter("node"))
+    if not all_nodes:
+        return False
+    clickable_with_text = [
+        n for n in all_nodes
+        if n.get("clickable") == "true"
+        and (n.get("text", "").strip() or n.get("content-desc", "").strip())
+    ]
+    has_game_view = any(n.get("class") in GAME_VIEW_CLASSES for n in all_nodes)
+    return has_game_view and len(clickable_with_text) == 0
+
+
+def _get_screen_size() -> tuple[int, int]:
+    result = _adb(["shell", "wm", "size"])
+    match = re.search(r"(\d+)x(\d+)", result.stdout)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return 1080, 1920
+
+
+def run_game_tutorial_bypass() -> str:
+    """Attempt to get past a game tutorial screen.
+
+    Returns:
+        "ok"                    — UI elements appeared, tutorial bypassed
+        "game_tutorial_blocked" — all attempts failed
+    """
+    w, h = _get_screen_size()
+    cx, cy = w // 2, h // 2
+
+    xml = dump_ui_hierarchy()
+    elements = parse_ui_elements(xml)
+    for el in elements:
+        search = el.searchable_text
+        if any(kw in search for kw in ["skip", "close", "x", "×"]):
+            tap(el.center_x, el.center_y)
+            time.sleep(1)
+            xml = dump_ui_hierarchy()
+            if not is_game_canvas(xml):
+                return "ok"
+
+    for _ in range(3):
+        tap(cx, cy)
+        time.sleep(1.5)
+        xml = dump_ui_hierarchy()
+        if not is_game_canvas(xml):
+            return "ok"
+
+    for tx, ty in [(w - 100, cy), (w - 100, h - 200)]:
+        tap(tx, ty)
+        time.sleep(1.5)
+        xml = dump_ui_hierarchy()
+        if not is_game_canvas(xml):
+            return "ok"
+
+    for _ in range(4):
+        swipe_left()
+        xml = dump_ui_hierarchy()
+        if not is_game_canvas(xml):
+            return "ok"
+
+    for _ in range(3):
+        time.sleep(3)
+        xml = dump_ui_hierarchy()
+        if not is_game_canvas(xml):
+            return "ok"
+
+    return "game_tutorial_blocked"
