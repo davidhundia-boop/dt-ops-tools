@@ -310,8 +310,36 @@ def handle_mention(event, client, say):
         legal = run_legal(apk_path)
         classification = run_classification(apk_path, legal)
 
+        verification = None
+        try:
+            from in_app_legal_verifier import verify_in_app_legal, compute_verdict, check_device_connected
+            if check_device_connected():
+                package = legal.get("package_name")
+                if package:
+                    ui_result = verify_in_app_legal(apk_path, package)
+                    static_legal = legal.get("in_app_legal", {})
+                    static_pp = bool(static_legal.get("in_app_pp_urls"))
+                    static_tc = bool(static_legal.get("in_app_tc_urls"))
+                    nav_info = ui_result.get("navigation_info", {})
+                    blocker = None
+                    if nav_info.get("login_wall"):
+                        blocker = "LOGIN_WALL"
+                    elif nav_info.get("game_tutorial_blocked"):
+                        blocker = "TUTORIAL_BLOCKED"
+                    ui_pp = ui_result["privacy_policy"]
+                    ui_tc = ui_result["terms_and_conditions"]
+                    pp_verdict = compute_verdict(static_pp, ui_pp["ui_found"], blocker)
+                    tc_verdict = compute_verdict(static_tc, ui_tc["ui_found"], blocker)
+                    verification = {
+                        "privacy_policy": {**pp_verdict, **ui_pp, "static_found": static_pp},
+                        "terms_and_conditions": {**tc_verdict, **ui_tc, "static_found": static_tc},
+                        "navigation_info": nav_info,
+                    }
+        except Exception as exc:
+            verification = None
+
         from report_formatter import build_report_blocks
-        blocks = build_report_blocks(wl, pi, legal, apk_filename or "unknown.apk", classification)
+        blocks = build_report_blocks(wl, pi, legal, apk_filename or "unknown.apk", classification, verification)
 
         client.chat_postMessage(
             channel=channel,
